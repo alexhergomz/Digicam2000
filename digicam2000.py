@@ -35,7 +35,7 @@ Usage:
 Dependencies: numpy + Pillow + typer (photos/CLI), ffmpeg/ffprobe (video).
 No ImageMagick.
 """
-import os, sys, subprocess, shutil, json, wave, tempfile
+import os, sys, subprocess, shutil, json, wave, tempfile, random
 from pathlib import Path
 from typing import Optional
 
@@ -47,6 +47,22 @@ from rich.table import Table
 
 __version__ = "1.0.0"
 console = Console()
+
+# A camera's defect map is a property of the silicon, so the hot/stuck pixels and the
+# readout fixed-pattern noise are keyed to a FIXED seed: they land in the same place on
+# every render, like the same camera being used again. Everything else (shot/read grain,
+# chroma blotches, tape head-switch hash, mic hiss) is fresh thermal noise and gets a new
+# random seed each render, unless the user pins one with --seed.
+SENSOR_SEED = 12345
+
+
+def _resolve_seed(seed):
+    """A concrete seed plus a private RNG for deriving per-stage sub-seeds. If `seed` is
+    None we draw a fresh one so each render differs; if it is given, the render is
+    reproducible (the sensor defects are fixed regardless)."""
+    if seed is None:
+        seed = random.randrange(1 << 32)
+    return seed, random.Random(seed)
 
 # --------------------------------------------------------------------------- #
 # small numpy DSP helpers (no scipy)
@@ -625,14 +641,16 @@ def downscale_linear(lin, out_w, out_h):
     return np.stack(chans, -1).astype(np.float32)
 
 
-def process_photo(in_path, out_path, p, datestamp=None, strength=1.0, seed=12345,
+def process_photo(in_path, out_path, p, datestamp=None, strength=1.0, seed=None,
                   smear_mode="classic", cast=None):
     img = Image.open(in_path).convert("RGB")
     W0, H0 = img.size
 
     x = np.asarray(img, np.float32) / 255.0
     lin = srgb_to_linear(x)
-    rng = np.random.default_rng(seed)
+    seed, _ = _resolve_seed(seed)
+    rng = np.random.default_rng(seed)                    # fresh thermal noise each render
+    sensor_rng = np.random.default_rng(SENSOR_SEED)      # fixed per-camera defect map
 
     def amt(v):  # global strength scaler for "amount"-like params
         return v * strength
@@ -669,9 +687,9 @@ def process_photo(in_path, out_path, p, datestamp=None, strength=1.0, seed=12345
     lin = ccd_smear(lin, clip, amt(p["smear"]), smear_mode)
     lin = purple_fringe(lin, clip, amt(p.get("fringe", 0.0)))             # brightness-dependent CA fringe
     lin = highlight_knee(lin, p["knee"])                                  # full-well roll-off (pre-WB)
-    lin = add_noise(lin, amt(p["noise_lum"]), amt(p["noise_chroma"]), rng)
-    lin = fixed_pattern_noise(lin, rng, amt(p.get("fpn", 0.0)))        # readout stripe pattern
-    lin = hot_pixels(lin, rng, p.get("hot_px", 0.0), amt(p.get("hot_amt", 0.0)))  # stuck/hot sensels
+    lin = add_noise(lin, amt(p["noise_lum"]), amt(p["noise_chroma"]), rng)         # varies per render
+    lin = fixed_pattern_noise(lin, sensor_rng, amt(p.get("fpn", 0.0)))             # fixed readout stripe pattern
+    lin = hot_pixels(lin, sensor_rng, p.get("hot_px", 0.0), amt(p.get("hot_amt", 0.0)))  # fixed stuck/hot sensels
     lin = bayer_emulate(lin, p["bayer"] * strength)
 
     # --- (e) ISP: white balance, then display-referred color/tone/NR/sharpen ---
@@ -893,11 +911,13 @@ def build_osd_filters(vp):
     ]
 
 
-def build_post_filters(vp, datestamp):
+def build_post_filters(vp, datestamp, noise_seed=-1):
     """Filters AFTER bloom/smear, in imaging order:
         sensor (limited DR -> read noise) -> ISP (white balance -> sat/contrast ->
         sharpen) -> scan/overlay (interlace, datestamp, OSD).
-    Vignetting is optical and is done back in the geometry stage, not here."""
+    Vignetting is optical and is done back in the geometry stage, not here.
+    `noise_seed` seeds the read-noise grain so it differs each render (it is thermal,
+    not a sensor defect); -1 lets ffmpeg pick its default."""
     h = vp["h"]
     cm = CAST_MULT.get(vp.get("cast"))                                   # residual illuminant cast
     wb = f"colorbalance=rm={vp['warm']}:bm=-{vp['warm']}"                # white balance first
@@ -909,7 +929,7 @@ def build_post_filters(vp, datestamp):
         # the flat modern look. Camcorders in low light instead *lift* the shadows
         # (AGC gain-up) into noisy murk -> presets can override `dr_curve`.
         f"curves=master='{vp.get('dr_curve', '0/0 0.12/0.05 0.78/0.86 1/1')}'",
-        f"noise=alls={vp['noise']}:allf=t+u",                           # read noise (before ISP sharpen)
+        f"noise=alls={vp['noise']}:allf=t+u:all_seed={noise_seed}",     # read noise (before ISP sharpen)
         # --- ISP ---
         wb,
         f"eq=saturation={vp['sat']}:contrast={vp['contrast']}",         # then color matrix / tone
@@ -927,7 +947,8 @@ def build_post_filters(vp, datestamp):
     return ",".join(filters)
 
 
-def build_video_graph(vp, datestamp, smear_mode="classic", hot_png=None, fpn_png=None, hsw_png=None):
+def build_video_graph(vp, datestamp, smear_mode="classic", hot_png=None, fpn_png=None,
+                      hsw_png=None, noise_seed=-1):
     """Full video chain '[0:v]...[v]', in true imaging order:
 
         sampling/exposure -> OPTICS -> SENSOR -> ISP -> scan/encode
@@ -1002,14 +1023,14 @@ def build_video_graph(vp, datestamp, smear_mode="classic", hot_png=None, fpn_png
     # If a VHS stage follows, the ISP output is the signal "sent to the recorder", so
     # post filters land on an intermediate label and the tape degradation produces [v].
     if vp.get("vhs"):
-        stmts.append(f"[{cur}]{build_post_filters(vp, datestamp)}[pf]")
+        stmts.append(f"[{cur}]{build_post_filters(vp, datestamp, noise_seed)}[pf]")
         stmts += build_vhs_stmts("pf", "v", w, h, hsw_png)
     else:
-        stmts.append(f"[{cur}]{build_post_filters(vp, datestamp)}[v]")
+        stmts.append(f"[{cur}]{build_post_filters(vp, datestamp, noise_seed)}[v]")
     return ";".join(stmts)
 
 
-def build_audio_graph(vp, motor=False):
+def build_audio_graph(vp, motor=False, hiss_seed=-1):
     """Audio chain in true capture order. Returns a filter_complex fragment ending in [a].
 
     Order matters: the mic's self-noise is analog, added at the mic/preamp BEFORE the
@@ -1022,7 +1043,7 @@ def build_audio_graph(vp, motor=False):
         mono (+ motor) -> +mic hiss -> band-limit -> AGC -> preamp clip -> ADC(bits+rate)
     """
     mono = "[0:a]aformat=channel_layouts=mono[m]"                         # single built-in mic
-    hiss = (f"anoisesrc=color=pink:amplitude={vp['ahiss']}:sample_rate=48000,"
+    hiss = (f"anoisesrc=color=pink:amplitude={vp['ahiss']}:sample_rate=48000:seed={hiss_seed},"
             "aformat=channel_layouts=mono[hs]")                          # mic/circuit self-noise
     pre = [mono, hiss]
     if motor:
@@ -1080,33 +1101,43 @@ def run_ffmpeg(cmd, label, duration=0.0):
         sys.exit(1)
 
 
-def process_video(in_path, out_path, vp, datestamp=None, audio=True, motor_wav=None, smear_mode="classic"):
+def process_video(in_path, out_path, vp, datestamp=None, audio=True, motor_wav=None,
+                  smear_mode="classic", seed=None):
     if not shutil.which("ffmpeg"):
         sys.exit("ffmpeg not found on PATH (needed for video).")
     do_audio = audio and has_audio(in_path)
     use_motor = bool(motor_wav) and do_audio
 
-    # Generate the static sensor-defect maps once (looped in by build_video_graph).
+    # Per-render seeds for the thermal noise (read grain, tape head-switch hash, mic hiss)
+    # so they differ each render; the sensor defect maps stay on the fixed SENSOR_SEED.
+    _, sub = _resolve_seed(seed)
+    noise_seed = sub.randrange(1 << 31)
+    hsw_seed = sub.randrange(1 << 31)
+    hiss_seed = sub.randrange(1 << 31)
+
+    # Generate the static sensor-defect maps once (looped in by build_video_graph). Hot
+    # pixels and FPN are the camera's permanent defect map -> fixed SENSOR_SEED. The VHS
+    # head-switch band is tape playback noise, not a sensor defect -> fresh seed.
     hot_png = fpn_png = None
     tmp_pngs = []
     if vp.get("hot_px"):
         hot_png = tempfile.NamedTemporaryFile(suffix=".png", delete=False).name
-        _hot_overlay_img(hot_png, vp["w"], vp["h"], vp["hot_px"], vp.get("hot_amt", 0.8), seed=12345)
+        _hot_overlay_img(hot_png, vp["w"], vp["h"], vp["hot_px"], vp.get("hot_amt", 0.8), seed=SENSOR_SEED)
         tmp_pngs.append(hot_png)
     if vp.get("fpn"):
         fpn_png = tempfile.NamedTemporaryFile(suffix=".png", delete=False).name
-        _fpn_overlay_img(fpn_png, vp["w"], vp["h"], vp["fpn"], seed=12345)
+        _fpn_overlay_img(fpn_png, vp["w"], vp["h"], vp["fpn"], seed=SENSOR_SEED)
         tmp_pngs.append(fpn_png)
     hsw_png = None
     if vp.get("vhs"):
         hsw_png = tempfile.NamedTemporaryFile(suffix=".png", delete=False).name
-        _headswitch_img(hsw_png, vp["w"], max(6, int(vp["h"] * 0.05)), seed=12345)
+        _headswitch_img(hsw_png, vp["w"], max(6, int(vp["h"] * 0.05)), seed=hsw_seed)
         tmp_pngs.append(hsw_png)
 
     try:
-        graph = build_video_graph(vp, datestamp, smear_mode, hot_png, fpn_png, hsw_png)
+        graph = build_video_graph(vp, datestamp, smear_mode, hot_png, fpn_png, hsw_png, noise_seed)
         if do_audio:
-            graph += ";" + build_audio_graph(vp, motor=use_motor)
+            graph += ";" + build_audio_graph(vp, motor=use_motor, hiss_seed=hiss_seed)
 
         cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", in_path]
         if use_motor:
@@ -1141,14 +1172,15 @@ def audio_ext(vp):
     return ".mp3" if vp["acodec"] == "libmp3lame" else ".wav"
 
 
-def process_audio(in_path, out_path, vp):
+def process_audio(in_path, out_path, vp, seed=None):
     """Audio-only: run a source sound through the built-in-mic degradation chain
     (mono -> hiss -> band-limit -> AGC -> ADC bit-crush/sample-rate) and encode with
     the preset's period codec. Same chain used for a video's soundtrack."""
     if not shutil.which("ffmpeg"):
         sys.exit("ffmpeg not found on PATH (needed for audio).")
+    _, sub = _resolve_seed(seed)
     cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", in_path,
-           "-filter_complex", build_audio_graph(vp),
+           "-filter_complex", build_audio_graph(vp, hiss_seed=sub.randrange(1 << 31)),
            "-map", "[a]", "-c:a", vp["acodec"], "-ar", str(vp["arate"]), "-ac", "1"]
     if vp["acodec"] == "libmp3lame":
         cmd += ["-b:a", vp.get("abitrate", "64k")]
@@ -1398,7 +1430,9 @@ def convert(
                              help="Burn in a camcorder OSD: blinking REC, timecode, battery, clock (video)."),
     cast: Optional[str] = typer.Option(None, "--cast",
                                        help="Light/WB cast: tungsten, fluorescent, or shade (photo + video)."),
-    seed: int = typer.Option(12345, "--seed", help="Noise RNG seed (photo)."),
+    seed: Optional[int] = typer.Option(None, "--seed",
+                                       help="Pin the random-noise seed for a reproducible render "
+                                            "(default: fresh each run). Sensor defects use a fixed seed regardless."),
     list_presets: bool = typer.Option(False, "--list", "-l", help="List all presets and exit."),
     _v: bool = typer.Option(False, "--version", callback=_version, is_eager=True, help="Show version and exit."),
 ):
@@ -1443,7 +1477,7 @@ def convert(
                                                        intensity=vp.get("zoom_motor", 0.35)))
         try:
             process_video(str(input), out, vp, datestamp, audio=not no_audio,
-                          motor_wav=motor_wav, smear_mode=smear)
+                          motor_wav=motor_wav, smear_mode=smear, seed=seed)
         finally:
             if motor_wav:
                 os.unlink(motor_wav)
@@ -1452,7 +1486,7 @@ def convert(
             typer.secho(f"note: '{preset}' has no audio profile; using 'digicam_video'.", fg="yellow")
         vp = dict(VIDEO_PRESETS.get(preset, VIDEO_PRESETS["digicam_video"]))
         out = str(output) if output else str(input.with_suffix("")) + ".digicam" + audio_ext(vp)
-        process_audio(str(input), out, vp)
+        process_audio(str(input), out, vp, seed=seed)
     elif ext in IMG_EXT:
         if preset not in PRESETS:
             typer.secho(f"Error: unknown photo preset '{preset}'. Try --list.", fg="red", err=True)
