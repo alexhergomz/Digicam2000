@@ -632,7 +632,9 @@ def build_video_graph(vp, datestamp):
     fps = vp["fps"] * 2 if interlace else vp["fps"]
 
     # --- sampling + exposure, then OPTICS (softness, vignetting) ---
-    g1 = [f"crop=ih*4/3:ih",                     # 4:3 sensor FOV (no stretch)
+    # 4:3 sensor FOV (no stretch): largest centered 4:3 box that fits any input
+    # aspect, so portrait or already-4:3 sources work too (commas escaped for ffmpeg).
+    g1 = [r"crop=w=min(iw\,ih*4/3):h=min(ih\,iw*3/4)",
           f"scale={w}:{h}:flags=lanczos",
           "setdar=4/3"]                          # display 4:3 even for 720x480 non-square pixels
     if not interlace and vp.get("mblur", 1) > 1:

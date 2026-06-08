@@ -25,3 +25,7 @@ test/*.png
 build/
 dist/
 .eggs/
+
+# personal test footage (not for the repo)
+real/
+/real/
