@@ -241,6 +241,51 @@ def add_noise(lin, lum_amt, chroma_amt, rng):
     return lin
 
 
+def hot_pixels(lin, rng, density, amount):
+    """Stuck / hot photosites: fixed defective pixels that leak charge.
+
+    A real CCD has a handful of sensels whose dark current is far above their
+    neighbours'. On a bright daylight frame they hide in the signal, but on a
+    long or high-ISO exposure they cross threshold and show as fixed specks:
+    single-channel R/G/B "stuck" pixels, or near-white "hot" ones. Their
+    positions come from the seed, so they sit in the same place every frame,
+    exactly like a given camera's defect map. Most visible in the shadows.
+    """
+    if density <= 0 or amount <= 0:
+        return lin
+    H, W = lin.shape[:2]
+    n = max(1, int(round(density * (H * W) / 1e6)))   # defects per megapixel
+    ys = rng.integers(0, H, n); xs = rng.integers(0, W, n)
+    mag = (amount * (0.5 + rng.random(n))).astype(np.float32)  # charge over threshold
+    ch = rng.integers(0, 3, n)
+    stuck = rng.random(n) < 0.6                        # 60% single-channel, 40% white-hot
+    out = lin.copy()
+    np.add.at(out, (ys[stuck], xs[stuck], ch[stuck]), mag[stuck])
+    hot = ~stuck
+    for c in range(3):
+        np.add.at(out, (ys[hot], xs[hot], c), mag[hot])
+    return np.clip(out, 0, None)
+
+
+def fixed_pattern_noise(lin, rng, amount):
+    """CCD readout fixed-pattern noise: a faint, frame-constant stripe pattern.
+
+    Charge is clocked out through a serial register into one or two shared
+    output amplifiers, so each column carries a small constant gain/offset from
+    its readout path; dark-current non-uniformity adds a weaker per-row term.
+    The result is a stationary vertical-stripe texture that's invisible in
+    bright detail but shows in flat shadows and skies. Fixed by the seed.
+    """
+    if amount <= 0:
+        return lin
+    H, W = lin.shape[:2]
+    col_gain = 1.0 + rng.standard_normal(W).astype(np.float32) * amount * 0.5
+    col_off = rng.standard_normal(W).astype(np.float32) * amount * 0.01
+    row_off = rng.standard_normal(H).astype(np.float32) * amount * 0.004
+    out = lin * col_gain[None, :, None] + col_off[None, :, None] + row_off[:, None, None]
+    return np.clip(out, 0, None)
+
+
 def highlight_knee(lin, knee):
     """Compress the top of the range -> the gentle CCD highlight roll-off."""
     if knee >= 1.0:
@@ -286,6 +331,20 @@ def chroma_nr(x, amount):
     chroma = x - luma
     chroma = chroma * (1 - amount) + gauss_blur(chroma, 1.6) * amount
     return np.clip(luma + chroma, 0, 1)
+
+
+def tone_banding(x, levels):
+    """Posterize to a reduced number of tone steps -> 8-bit-JPEG banding.
+
+    Early digicams captured straight to 8-bit JPEG, so a smooth gradient only
+    had ~256 levels to work with and broke into visible bands in skies and
+    shadows. Quantizing to fewer levels reproduces it: textured areas are
+    dithered by the sensor noise added earlier and stay smooth, while the flat
+    gradients step, just like the period artifact.
+    """
+    if not levels or levels >= 256:
+        return x
+    return np.clip(np.round(x * (levels - 1)) / (levels - 1), 0, 1)
 
 
 # --------------------------------------------------------------------------- #
@@ -384,6 +443,19 @@ PRESETS = {
         wb=(1.05, 1.0, 0.95), knee=0.90, sat=1.4, skin_magenta=0.5,
         contrast=0.2, black=0.02, sharpen=0.9, sharpen_sigma=1.0,
         jpeg_q=82, jpeg_passes=1, fmt="420",
+    ),
+
+    # Night / long-exposure high-ISO grab: warm tungsten cast, lifted murky
+    # blacks (AGC), heavy noise, strong smear off point lights, and the
+    # low-light sensor tells -- hot/stuck pixels, readout stripe FPN, banding.
+    "night": dict(
+        mp=2.0, barrel=0.02, ca=0.0016, vignette=0.5,
+        bloom_thresh=0.7, bloom_amt=0.85, bloom_sigma=8, smear=0.30,
+        bayer=0.8, noise_lum=0.05, noise_chroma=0.18, chroma_nr=0.45,
+        wb=(1.18, 1.0, 0.78), knee=0.82, sat=1.1, skin_magenta=0.5,
+        contrast=0.16, black=0.06, sharpen=0.7, sharpen_sigma=1.1,
+        jpeg_q=70, jpeg_passes=1, fmt="420",
+        hot_px=60, hot_amt=0.9, fpn=0.06, bands=72,
     ),
 }
 
@@ -496,6 +568,8 @@ def process_photo(in_path, out_path, p, datestamp=None, strength=1.0, seed=12345
     lin = ccd_smear(lin, clip, amt(p["smear"]))
     lin = highlight_knee(lin, p["knee"])                                  # full-well roll-off (pre-WB)
     lin = add_noise(lin, amt(p["noise_lum"]), amt(p["noise_chroma"]), rng)
+    lin = fixed_pattern_noise(lin, rng, amt(p.get("fpn", 0.0)))        # readout stripe pattern
+    lin = hot_pixels(lin, rng, p.get("hot_px", 0.0), amt(p.get("hot_amt", 0.0)))  # stuck/hot sensels
     lin = bayer_emulate(lin, p["bayer"] * strength)
 
     # --- (e) ISP: white balance, then display-referred color/tone/NR/sharpen ---
@@ -505,6 +579,7 @@ def process_photo(in_path, out_path, p, datestamp=None, strength=1.0, seed=12345
     x = s_curve(x, p["contrast"] * strength, p["black"])
     x = chroma_nr(x, amt(p["chroma_nr"]))
     x = unsharp(x, amt(p["sharpen"]), p["sharpen_sigma"])
+    x = tone_banding(x, p.get("bands", 0))                                # 8-bit gradient banding
 
     out = Image.fromarray((np.clip(x, 0, 1) * 255 + 0.5).astype(np.uint8), "RGB")
 
@@ -962,6 +1037,7 @@ PRESET_DESC = {  # photo
     "flash": "harsh on-camera flash, hot center, dark falloff",
     "lofi": "cheap / high-ISO indoor, noisy, soft",
     "camcorder": "low-res soft video-still grab",
+    "night": "long-exposure low-light: warm, noisy, hot pixels + banding",
 }
 VIDEO_DESC = {
     "digicam": "digicam movie mode, MJPEG 640x480 + IMA-ADPCM",
