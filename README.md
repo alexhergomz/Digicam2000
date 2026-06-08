@@ -35,7 +35,8 @@ digicam2000 --help
 
 The input type is detected from the extension. Default output is `<input>.digicam.<ext>`.
 Useful flags: `-p/--preset`, `-s/--strength 0..1.5` (photo), `--mp` (target megapixels),
-`-d/--datestamp`, `--no-audio`, `--no-zoom-sound`, `--barrel`. Video and audio show a progress bar.
+`-d/--datestamp`, `--no-audio`, `--zoom 2-4,7-8.5` (zoom-motor sound over time ranges),
+`--smear classic|physical`, `--barrel`. Video and audio show a progress bar.
 
 ![digicam2000 CLI](docs/cli.svg)
 
@@ -117,7 +118,7 @@ Each artifact maps to a real cause and runs at the right point in the chain:
 | --- | --- | --- |
 | Lens | cheap zoom optics, lateral CA, light falloff | mild barrel distortion, radial R/B fringing, vignetting |
 | CCD highlights | low dynamic range, halation | two-scale bloom and a soft highlight roll-off |
-| CCD smear | a saturated photosite leaks charge down its column | a vertical streak, white at the bright source and purple in the dim tail |
+| CCD smear | a saturated photosite leaks charge down its column | a vertical magenta/purple streak (classic; or white-to-purple with `--smear physical`) |
 | Bayer CFA | one color sampled per pixel, then interpolated | softening and false-color zipper on edges |
 | Noise | shot noise (sigma proportional to sqrt of signal) plus a read floor | signal-dependent grain, chroma blotches worst in shadows |
 | In-camera ISP | weak auto white balance, punchy matrix, sharpening, chroma NR | color cast, oversaturation, edge halos, color smear |
@@ -133,17 +134,29 @@ Details that keep it from looking like a modern clip with a filter:
 - Chromatic aberration is radial and small: zero at the center, a couple of pixels at the
   corners. It is not a uniform whole-frame color shift.
 - Bloom and smear are found by brightness and contrast (local prominence), so a lamp or a
-  lit window glows and smears even in a dark scene, while a flat bright sky does not. The
-  smear is additive charge, so it is white at the bright source and only the dim tail keeps
-  the purple tint, the way real CCD smear washes out with brightness.
+  lit window smears, while a large flat bright area does not. The default smear is the
+  classic uniform magenta/purple streak. A physically-accurate smear that washes from
+  purple (faint) to white (bright) is available with `--smear physical` (work in progress;
+  see Status below).
 - Video gets a 4:3 crop (a 4:3 sensor cropped the field of view, it did not squish 16:9),
   motion blur for low frame-rate capture, a limited dynamic range curve, and lens softness.
   The camcorder profile lifts shadows into low-light grain instead of clean black.
 - Audio runs in capture order. Mic self-noise is added before the AGC, so the gain control
   pumps the noise floor up in quiet passages. The ADC bit-crush and sample rate come after.
-- Zoom is detected from the video (frame scaling about the center over time); when found, a
-  synthesized servo-motor whir is mixed into the mic chain for those moments, the way the
-  built-in mic picked up the lens motor. Disable with `--no-zoom-sound`.
+- Zoom motor: a synthesized low servo whir is mixed into the mic chain over the time ranges
+  you pass to `--zoom` (for example `--zoom 2-4,7-8.5`), the way the built-in mic picked up
+  the lens motor.
+
+## Status / known limitations
+
+- Automatic zoom detection (`--zoom-sound`) is **work in progress and off by default**. A
+  forward dolly or walking shot scales the image the same way an optical zoom does, so it
+  cannot be told apart from 2D motion alone and the detector misfires on handheld footage.
+  Use `--zoom` to place the motor sound by hand instead. (You can also process the audio on
+  its own and add motor noise yourself.)
+- The `--smear physical` model is WIP: it is physically correct (white core, purple tail)
+  but its strength is still uneven across scenes. The default `classic` smear is the stable
+  one.
 
 References behind the model: CCD color and highlight roll-off
 ([smear](https://www.dpreview.com/forums/thread/2848955),

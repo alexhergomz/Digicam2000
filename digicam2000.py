@@ -173,36 +173,33 @@ def highlight_bloom(lin, L, amount, sigma):
     return lin + glow * amount
 
 
-def ccd_smear(lin, clip, amount):
+def ccd_smear(lin, clip, amount, mode="classic"):
     """Vertical charge-leak streaks from *saturated* pixels (the CCD tell), in linear light.
 
-    Physically the streak is overflow CHARGE added along the readout column, so it is
-    additive, and its colour depends on how much charge there is:
-
-      * a faint streak carries a magenta/purple cast (the green photosites leak a bit
-        less than red and blue on a typical CCD), but
-      * as the charge grows it floods every channel, so a bright streak desaturates and
-        washes out to WHITE (it is not a saturated purple).
-
-    We model this: `q` is the (additive) charge, with a white-hot core at the source
-    fading along the column; the tint is interpolated from purple at low q to white at
-    high q, so bright sources clip to white and only the dim parts stay purple.
+    Two models:
+      * "classic" (default): the original, a uniform magenta/purple streak added along the
+        column. Simple and reads well.
+      * "physical" (WIP): the streak is overflow CHARGE, so its colour depends on amount,
+        white at a bright core and grading to purple in the dim tail. Still being tuned.
     """
     if amount <= 0:
         return lin
     over = np.clip(clip, 0, 1) ** 1.2
-    decay = 0.985                             # slow fade: a long streak that grades white core -> purple tail
+    decay = 0.985 if mode == "physical" else 0.97
     up = np.empty_like(over); acc = np.zeros_like(over[0])
     for i in range(over.shape[0]):
         acc = np.maximum(over[i], acc * decay); up[i] = acc
     dn = np.empty_like(over); acc = np.zeros_like(over[0])
     for i in range(over.shape[0] - 1, -1, -1):
         acc = np.maximum(over[i], acc * decay); dn[i] = acc
-    q = np.maximum(up, dn) * amount           # additive charge profile (white-hot core, fading tail)
-    t = np.clip(q / 0.55, 0, 1)[..., None]    # desaturation: 0 -> purple, 1 -> white
-    purple = np.array([0.85, 0.40, 1.0], np.float32)
-    color = purple * (1 - t) + t              # white is 1.0 on every channel
-    return lin + q[..., None] * color
+    streak = np.maximum(up, dn)
+    if mode == "physical":
+        q = streak * amount * 4.0                 # scale up for the additive charge model
+        t = np.clip(q / 0.40, 0, 1)[..., None]    # 0 -> purple, 1 -> white
+        purple = np.array([0.85, 0.40, 1.0], np.float32)
+        return lin + q[..., None] * (purple * (1 - t) + t)
+    tint = np.array([0.55, 0.35, 0.95], np.float32)   # classic uniform magenta/purple
+    return lin + (streak * amount)[..., None] * tint
 
 
 def bayer_emulate(lin, strength):
@@ -354,7 +351,7 @@ PRESETS = {
     # Outdoor daylight: punchy CCD color, mild everything, warm auto-WB.
     "daylight": dict(
         mp=2.0, barrel=0.018, ca=0.0012, vignette=0.35,
-        bloom_thresh=0.8, bloom_amt=0.5, bloom_sigma=6, smear=0.58,
+        bloom_thresh=0.8, bloom_amt=0.5, bloom_sigma=6, smear=0.13,
         bayer=0.7, noise_lum=0.012, noise_chroma=0.05, chroma_nr=0.4,
         wb=(1.06, 1.0, 0.93), knee=0.85, sat=1.28, skin_magenta=0.5,
         contrast=0.22, black=0.02, sharpen=0.9, sharpen_sigma=1.0,
@@ -363,7 +360,7 @@ PRESETS = {
     # The classic look: harsh on-camera flash. Hot center, dark falloff, cooler.
     "flash": dict(
         mp=2.0, barrel=0.018, ca=0.0013, vignette=0.6,
-        bloom_thresh=0.7, bloom_amt=0.8, bloom_sigma=7, smear=0.72,
+        bloom_thresh=0.7, bloom_amt=0.8, bloom_sigma=7, smear=0.16,
         bayer=0.7, noise_lum=0.02, noise_chroma=0.08, chroma_nr=0.45,
         wb=(1.02, 1.0, 1.02), knee=0.78, sat=1.18, skin_magenta=0.7,
         contrast=0.3, black=0.03, sharpen=1.0, sharpen_sigma=1.0,
@@ -372,7 +369,7 @@ PRESETS = {
     # Cheaper / older / higher-ISO indoor: more noise, softer, stronger artifacts.
     "lofi": dict(
         mp=1.0, barrel=0.03, ca=0.0018, vignette=0.5,
-        bloom_thresh=0.78, bloom_amt=0.6, bloom_sigma=6, smear=0.95,
+        bloom_thresh=0.78, bloom_amt=0.6, bloom_sigma=6, smear=0.24,
         bayer=0.9, noise_lum=0.035, noise_chroma=0.14, chroma_nr=0.5,
         wb=(1.05, 1.0, 0.9), knee=0.8, sat=1.15, skin_magenta=0.6,
         contrast=0.18, black=0.04, sharpen=1.2, sharpen_sigma=1.1,
@@ -381,7 +378,7 @@ PRESETS = {
     # Camcorder-still grab: low res, soft, heavy chroma loss.
     "camcorder": dict(
         mp=0.35, barrel=0.025, ca=0.0016, vignette=0.45,
-        bloom_thresh=0.78, bloom_amt=0.6, bloom_sigma=5, smear=0.81,
+        bloom_thresh=0.78, bloom_amt=0.6, bloom_sigma=5, smear=0.18,
         bayer=0.6, noise_lum=0.025, noise_chroma=0.12, chroma_nr=0.7,
         wb=(1.04, 1.0, 0.95), knee=0.8, sat=1.2, skin_magenta=0.5,
         contrast=0.2, black=0.03, sharpen=0.6, sharpen_sigma=1.2,
@@ -393,7 +390,7 @@ PRESETS = {
     # Flagship "typical 2MP CCD digicam circa 2002": warm, punchy, balanced artifacts.
     "digicam": dict(
         mp=2.0, barrel=0.016, ca=0.0013, vignette=0.32,
-        bloom_thresh=0.8, bloom_amt=0.5, bloom_sigma=6, smear=0.54,
+        bloom_thresh=0.8, bloom_amt=0.5, bloom_sigma=6, smear=0.13,
         bayer=0.75, noise_lum=0.014, noise_chroma=0.05, chroma_nr=0.4,
         wb=(1.05, 1.0, 0.93), knee=0.84, sat=1.28, skin_magenta=0.5,
         contrast=0.22, black=0.02, sharpen=0.95, sharpen_sigma=1.0,
@@ -402,7 +399,7 @@ PRESETS = {
     # Kodak DC / EasyShare ("Kodak Color Science"): warm, very saturated, punchy reds, soft.
     "kodak": dict(
         mp=2.1, barrel=0.018, ca=0.0012, vignette=0.35,
-        bloom_thresh=0.8, bloom_amt=0.55, bloom_sigma=6, smear=0.54,
+        bloom_thresh=0.8, bloom_amt=0.55, bloom_sigma=6, smear=0.12,
         bayer=0.8, noise_lum=0.012, noise_chroma=0.05, chroma_nr=0.45,
         wb=(1.09, 1.0, 0.89), knee=0.82, sat=1.42, skin_magenta=0.7,
         contrast=0.24, black=0.025, sharpen=0.8, sharpen_sigma=1.0,
@@ -411,7 +408,7 @@ PRESETS = {
     # Sony Cyber-shot: fairly neutral / slightly cool, contrasty, heavily sharpened, clean.
     "sony": dict(
         mp=2.5, barrel=0.014, ca=0.0012, vignette=0.30,
-        bloom_thresh=0.8, bloom_amt=0.45, bloom_sigma=5, smear=0.58,
+        bloom_thresh=0.8, bloom_amt=0.45, bloom_sigma=5, smear=0.12,
         bayer=0.7, noise_lum=0.012, noise_chroma=0.045, chroma_nr=0.35,
         wb=(1.0, 1.0, 1.03), knee=0.80, sat=1.15, skin_magenta=0.3,
         contrast=0.30, black=0.03, sharpen=1.2, sharpen_sigma=1.0,
@@ -420,7 +417,7 @@ PRESETS = {
     # Canon PowerShot: clean, slightly warm, balanced saturation, good detail, light artifacts.
     "canon": dict(
         mp=2.0, barrel=0.015, ca=0.0011, vignette=0.30,
-        bloom_thresh=0.8, bloom_amt=0.45, bloom_sigma=6, smear=0.49,
+        bloom_thresh=0.8, bloom_amt=0.45, bloom_sigma=6, smear=0.11,
         bayer=0.7, noise_lum=0.011, noise_chroma=0.04, chroma_nr=0.4,
         wb=(1.04, 1.0, 0.97), knee=0.83, sat=1.2, skin_magenta=0.45,
         contrast=0.22, black=0.02, sharpen=1.0, sharpen_sigma=1.0,
@@ -429,7 +426,7 @@ PRESETS = {
     # Nikon Coolpix: crisp, slightly cool/green cast, a touch noisier.
     "nikon": dict(
         mp=2.0, barrel=0.016, ca=0.0014, vignette=0.32,
-        bloom_thresh=0.8, bloom_amt=0.45, bloom_sigma=5, smear=0.54,
+        bloom_thresh=0.8, bloom_amt=0.45, bloom_sigma=5, smear=0.12,
         bayer=0.75, noise_lum=0.016, noise_chroma=0.06, chroma_nr=0.4,
         wb=(0.99, 1.02, 1.0), knee=0.81, sat=1.12, skin_magenta=0.35,
         contrast=0.24, black=0.03, sharpen=1.1, sharpen_sigma=1.0,
@@ -438,7 +435,7 @@ PRESETS = {
     # Fujifilm FinePix (Super CCD): vivid/velvia-like saturation, warm, smooth highlight roll-off.
     "fuji": dict(
         mp=2.5, barrel=0.015, ca=0.0012, vignette=0.30,
-        bloom_thresh=0.82, bloom_amt=0.6, bloom_sigma=7, smear=0.45,
+        bloom_thresh=0.82, bloom_amt=0.6, bloom_sigma=7, smear=0.1,
         bayer=0.7, noise_lum=0.012, noise_chroma=0.05, chroma_nr=0.4,
         wb=(1.05, 1.0, 0.95), knee=0.90, sat=1.4, skin_magenta=0.5,
         contrast=0.2, black=0.02, sharpen=0.9, sharpen_sigma=1.0,
@@ -476,7 +473,7 @@ AGC_COMPAND = {
 VIDEO_PRESETS = {
     # ~2002 digicam movie mode: 640x480 / 15fps Motion-JPEG AVI, 11k 8-bit IMA-ADPCM mono.
     "digicam_video": dict(w=640, h=480, fps=15, codec="mjpeg", qv=8, ext=".avi",
-                          interlace=False, ca=0.003, vignette=0.45, noise=12, soft=0.5, mblur=3, bloom=0.25, smear=0.5,
+                          interlace=False, ca=0.003, vignette=0.45, noise=12, soft=0.5, mblur=3, bloom=0.25, smear=0.6,
                           sat=1.18, contrast=1.12, warm=0.06, sharp=0.6, chroma="yuvj420p",
                           arate=11025, ahp=250, alp=6000, abits=8, ahiss=0.005,
                           aagc="strong", adrive=2.0, acodec="adpcm_ima_wav"),
@@ -489,7 +486,7 @@ VIDEO_PRESETS = {
                       aagc="med", adrive=0.0, acodec="pcm_s16le", zoom_motor=0.6),
     # Low-bitrate MPEG (early SD card / web clip): heavy macroblocking + warbly low-rate MP3.
     "mpeg_lofi": dict(w=320, h=240, fps=15, codec="mpeg4", qv=None, bitrate="320k", ext=".avi",
-                      interlace=False, ca=0.004, vignette=0.5, noise=16, soft=0.6, mblur=3, bloom=0.25, smear=0.5,
+                      interlace=False, ca=0.004, vignette=0.5, noise=16, soft=0.6, mblur=3, bloom=0.25, smear=0.6,
                       sat=1.12, contrast=1.1, warm=0.07, sharp=0.5, chroma="yuv420p",
                       arate=22050, ahp=200, alp=8000, abits=0, ahiss=0.004,
                       aagc="med", adrive=1.0, acodec="libmp3lame", abitrate="56k"),
@@ -497,13 +494,13 @@ VIDEO_PRESETS = {
     # --- Camera movie-mode profiles ---
     # Typical 2002 digicam movie mode (= digicam_video): MJPEG AVI + IMA-ADPCM.
     "digicam": dict(w=640, h=480, fps=15, codec="mjpeg", qv=8, ext=".avi",
-                    interlace=False, ca=0.003, vignette=0.42, noise=12, soft=0.5, mblur=3, bloom=0.25, smear=0.5,
+                    interlace=False, ca=0.003, vignette=0.42, noise=12, soft=0.5, mblur=3, bloom=0.25, smear=0.6,
                     sat=1.22, contrast=1.12, warm=0.06, sharp=0.6, chroma="yuvj420p",
                     arate=11025, ahp=250, alp=6000, abits=8, ahiss=0.005,
                     aagc="strong", adrive=2.0, acodec="adpcm_ima_wav"),
     # Sony Cyber-shot "MPEG Movie": 320x240 @ ~16fps MPEG-1-style, tiny mono track.
     "sony": dict(w=320, h=240, fps=16, codec="mpeg4", qv=None, bitrate="550k", ext=".avi",
-                 interlace=False, ca=0.003, vignette=0.4, noise=12, soft=0.5, mblur=3, bloom=0.22, smear=0.45,
+                 interlace=False, ca=0.003, vignette=0.4, noise=12, soft=0.5, mblur=3, bloom=0.22, smear=0.55,
                  sat=1.14, contrast=1.16, warm=0.0, sharp=0.7, chroma="yuv420p",
                  arate=16000, ahp=180, alp=7000, abits=0, ahiss=0.004,
                  aagc="med", adrive=1.0, acodec="libmp3lame", abitrate="64k"),
@@ -525,7 +522,7 @@ def downscale_linear(lin, out_w, out_h):
     return np.stack(chans, -1).astype(np.float32)
 
 
-def process_photo(in_path, out_path, p, datestamp=None, strength=1.0, seed=12345):
+def process_photo(in_path, out_path, p, datestamp=None, strength=1.0, seed=12345, smear_mode="classic"):
     img = Image.open(in_path).convert("RGB")
     W0, H0 = img.size
 
@@ -565,7 +562,7 @@ def process_photo(in_path, out_path, p, datestamp=None, strength=1.0, seed=12345
     #         then CFA mosaic + demosaic (so the noise is correlated by demosaicing) ---
     L, clip = light_source_map(lin)
     lin = highlight_bloom(lin, L, amt(p["bloom_amt"]), p["bloom_sigma"])
-    lin = ccd_smear(lin, clip, amt(p["smear"]))
+    lin = ccd_smear(lin, clip, amt(p["smear"]), smear_mode)
     lin = highlight_knee(lin, p["knee"])                                  # full-well roll-off (pre-WB)
     lin = add_noise(lin, amt(p["noise_lum"]), amt(p["noise_chroma"]), rng)
     lin = fixed_pattern_noise(lin, rng, amt(p.get("fpn", 0.0)))        # readout stripe pattern
@@ -637,32 +634,35 @@ def video_ca_radial(in_lbl, out_lbl, e, w, h):
             f"[cars][cags][cabs]mergeplanes=0x102000:gbrp[{out_lbl}]")
 
 
-def video_smear(in_lbl, out_lbl, amount, h):
-    """CCD vertical smear for video: a saturated source leaks charge down its column.
+def video_smear(in_lbl, out_lbl, amount, h, mode="classic"):
+    """CCD vertical smear for video. Highlights are found by relative brightness
+    ('prominence' = luma minus a local average), spread down the column, tinted and
+    blended over the frame.
 
-    Detection uses BRIGHTNESS *and* CONTRAST: 'prominence' = luma - (wide local average),
-    so a bright object on a dark background smears even when it never reaches near-white,
-    while a flat wall does not.
-
-    Colour is physically modelled like the photo path: the streak is ADDED (it is
-    overflow charge), and its tint depends on charge. The green channel lags at low
-    charge (so a faint streak reads magenta/purple), then catches up as charge rises, so
-    a bright streak floods all channels and washes out to WHITE rather than staying a
-    saturated purple."""
-    sy = max(16, h // 4)                                  # vertical reach (box average dilutes, so keep moderate)
-    bg = max(40, h // 3)                                  # wide local average so isolated bright objects stand out
-    return (
-        f"[{in_lbl}]split=3[sm0][smA][smB];"
-        f"[smB]format=gray,gblur=sigma={bg}[smavg];"      # local average brightness
-        f"[smA]format=gray[smg];"
-        f"[smg][smavg]blend=all_mode=subtract[smc];"      # prominence = luma - local avg (charge)
-        f"[smc]curves=all='0/0 0.04/0 0.16/1 1/1',"      # floor out noise, saturate real sources to full charge
-        f"avgblur=sizeX=1:sizeY={sy}[q];"                 # spread down/up the column, stay thin
-        f"[q]split[qa][qb];"
-        f"[qb]curves=all='0/0 0.5/0.16 0.8/0.5 1/1'[qg];"  # green lags -> purple when faint, white when bright
-        f"[qg][qa]mergeplanes=0x001010:gbrp,"            # R,B = charge; G = lagging green
-        f"colorchannelmixer=rr={amount*3:.3f}:gg={amount*3:.3f}:bb={amount*3:.3f}[smt];"  # gain (box-blur dilutes)
-        f"[sm0][smt]blend=all_mode=addition[{out_lbl}]")  # additive -> bright cores clip to white
+    Two models:
+      * "classic" (default): a uniform magenta/purple streak, screen-blended. The
+        original look; reads clearly.
+      * "physical" (WIP): additive charge whose tint washes from purple (faint) to white
+        (bright). Still being tuned (it can look too strong or too weak by scene).
+    """
+    bg = max(24, h // 3)                                   # local-average radius (relative-brightness gate)
+    sy = max(20, h // 2)                                   # vertical reach
+    pre = (f"[{in_lbl}]split=3[sm0][smA][smB];"
+           f"[smB]format=gray,gblur=sigma={bg}[smavg];"
+           f"[smA]format=gray[smg];"
+           f"[smg][smavg]blend=all_mode=subtract[smc];"    # prominence = luma - local avg
+           f"[smc]curves=all='0/0 0.08/0 0.30/1 1/1',avgblur=sizeX=1:sizeY={sy}[q];")
+    if mode == "physical":
+        g = amount * 1.4
+        return (pre +
+                f"[q]split[qa][qb];"
+                f"[qb]curves=all='0/0 0.5/0.32 0.85/0.7 1/1'[qg];"     # green lags -> purple..white
+                f"[qg][qa]mergeplanes=0x001010:gbrp,"
+                f"colorchannelmixer=rr={g:.3f}:gg={g:.3f}:bb={g:.3f}[smt];"
+                f"[sm0][smt]blend=all_mode=addition[{out_lbl}]")
+    return (pre +                                          # classic uniform purple, screen-blended
+            f"[q]format=gbrp,colorchannelmixer=rr=0.95:gg=0.32:bb=1.08[smt];"
+            f"[sm0][smt]blend=all_mode=screen:all_opacity={amount}[{out_lbl}]")
 
 
 def build_post_filters(vp, datestamp):
@@ -694,7 +694,7 @@ def build_post_filters(vp, datestamp):
     return ",".join(filters)
 
 
-def build_video_graph(vp, datestamp):
+def build_video_graph(vp, datestamp, smear_mode="classic"):
     """Full video chain '[0:v]...[v]', in true imaging order:
 
         sampling/exposure -> OPTICS -> SENSOR -> ISP -> scan/encode
@@ -749,7 +749,7 @@ def build_video_graph(vp, datestamp):
 
     # --- sensor: CCD vertical purple smear (charge leak from clipped highlights) ---
     if vp.get("smear", 0) > 0:
-        stmts.append(video_smear(cur, "smr", vp["smear"], h)); cur = "smr"
+        stmts.append(video_smear(cur, "smr", vp["smear"], h, smear_mode)); cur = "smr"
 
     # --- sensor response + ISP + scan/overlay ---
     stmts.append(f"[{cur}]{build_post_filters(vp, datestamp)}[v]")
@@ -825,13 +825,13 @@ def run_ffmpeg(cmd, label, duration=0.0):
         sys.exit(1)
 
 
-def process_video(in_path, out_path, vp, datestamp=None, audio=True, motor_wav=None):
+def process_video(in_path, out_path, vp, datestamp=None, audio=True, motor_wav=None, smear_mode="classic"):
     if not shutil.which("ffmpeg"):
         sys.exit("ffmpeg not found on PATH (needed for video).")
     do_audio = audio and has_audio(in_path)
     use_motor = bool(motor_wav) and do_audio
 
-    graph = build_video_graph(vp, datestamp)
+    graph = build_video_graph(vp, datestamp, smear_mode)
     if do_audio:
         graph += ";" + build_audio_graph(vp, motor=use_motor)
 
@@ -896,71 +896,69 @@ def has_audio(path):
 # it worse). We detect zoom from the video (the frame scaling about its center over
 # time) and synthesize a matching motor whir into the mic chain.
 
-def _scale_about_center(img, c):
-    """Scale a 2D uint8/float frame by factor c about its center, same output size."""
-    H, W = img.shape
-    nw, nh = max(1, round(W * c)), max(1, round(H * c))
-    im = Image.fromarray(img.astype(np.uint8)).resize((nw, nh), Image.BILINEAR)
-    canvas = Image.new("L", (W, H))
-    canvas.paste(im, ((W - nw) // 2, (H - nh) // 2))   # PIL crops/pads as needed
-    return np.asarray(canvas, np.float32)
-
-
-def _translation(a, b):
-    """Integer (dx, dy) that best shifts `a` onto `b`, via phase correlation. Phase
-    correlation keys on the cross-power spectrum, which depends only on translation, so
-    this is robust and lets us separate handheld panning (pure translation) from zoom
-    (scale about the center)."""
+def _phase_shift(a, b):
+    """(dx, dy, confidence) that shifts `a` onto `b`, by phase correlation. The cross-power
+    spectrum depends only on translation, so this is a robust translation estimator; the
+    normalized correlation peak height is returned as a confidence."""
     A = np.fft.rfft2(a); B = np.fft.rfft2(b)
     R = A * np.conj(B)
     R /= np.abs(R) + 1e-6
     c = np.fft.irfft2(R, s=a.shape)
-    dy, dx = np.unravel_index(int(np.argmax(c)), c.shape)
+    idx = int(np.argmax(c)); peak = float(c.flat[idx])
+    dy, dx = np.unravel_index(idx, c.shape)
     H, W = a.shape
     if dy > H // 2: dy -= H
     if dx > W // 2: dx -= W
-    return int(dx), int(dy)
+    return int(dx), int(dy), peak
 
 
-def detect_zoom(in_path, analyze_fps=6):
-    """Return a list of (start_s, end_s, speed) zoom segments.
+def _scale_about_center(img, c):
+    """Scale a 2D frame by factor c about its center, same output size."""
+    H, W = img.shape
+    nw, nh = max(1, round(W * c)), max(1, round(H * c))
+    im = Image.fromarray(img.astype(np.uint8)).resize((nw, nh), Image.BILINEAR)
+    canvas = Image.new("L", (W, H))
+    canvas.paste(im, ((W - nw) // 2, (H - nh) // 2))
+    return np.asarray(canvas, np.float32)
 
-    For each frame pair we find the scale-about-center that best matches the next frame.
-    Two guards keep handheld motion, pans and shake from registering as zoom:
-      * the best scale must fit clearly better than no-scaling (ratio test) -- a pan or
-        translation is not improved by scaling, so it is rejected; and
-      * a kept segment must have a real, sustained directional scale change (the net
-        zoom over the segment exceeds a few percent) -- jitter alternates sign and
-        cancels out.
+
+def detect_zoom(in_path, analyze_fps=5):
+    """Return (start_s, end_s, speed) zoom segments.
+
+    A zoom is a SCALE about the center; handheld motion is mostly TRANSLATION. For each
+    frame pair we estimate and remove the translation (phase correlation), then find the
+    scale-about-center that best matches the next frame and how much better it fits than
+    no-scaling (ratio). Because a real *optical* zoom is deliberate, we only keep a
+    segment when the scale change is strong, sustained, and (unlike shake or a dolly
+    wobble) monotonic in one direction. Note a strong forward dolly scales the image like
+    a zoom and cannot be told apart from 2D motion alone, so it may also register.
     """
-    W, H = 128, 72
+    W, H = 160, 90
     raw = subprocess.run(
         ["ffmpeg", "-v", "error", "-i", in_path, "-vf",
          f"fps={analyze_fps},scale={W}:{H},format=gray", "-f", "rawvideo", "-"],
         capture_output=True).stdout
     n = len(raw) // (W * H)
-    if n < 5:
+    if n < 6:
         return []
     frames = np.frombuffer(raw[:n * W * H], np.uint8).reshape(n, H, W).astype(np.float32)
-    cand = np.linspace(0.94, 1.06, 7)                        # inter-frame scale guesses (1.0 = middle)
-    mid = len(cand) // 2
-    y0, y1, x0, x1 = int(H * 0.25), int(H * 0.75), int(W * 0.25), int(W * 0.75)  # center window
+    cand = np.linspace(0.94, 1.06, 7)                        # inter-frame scale guesses (index 3 == 1.0)
+    mid = 3
+    y0, y1, x0, x1 = int(H * 0.3), int(H * 0.7), int(W * 0.3), int(W * 0.7)
     best = np.ones(n - 1, np.float32)
-    ratio = np.ones(n - 1, np.float32)                       # err(best scale) / err(no scale)
+    ratio = np.ones(n - 1, np.float32)
     for i in range(n - 1):
-        # remove handheld translation first: align frame i onto i+1 by the estimated
-        # shift, so the leftover only-improves-with-scaling part is the actual zoom.
-        dx, dy = _translation(frames[i], frames[i + 1])
-        a = np.roll(np.roll(frames[i], dy, axis=0), dx, axis=1)
+        dx, dy, _ = _phase_shift(frames[i], frames[i + 1])   # remove handheld translation
+        a = np.roll(np.roll(frames[i], dy, 0), dx, 1)
         b = frames[i + 1][y0:y1, x0:x1]
         err = [np.mean((_scale_about_center(a, c)[y0:y1, x0:x1] - b) ** 2) for c in cand]
         j = int(np.argmin(err))
         best[i] = cand[j]
         ratio[i] = err[j] / (err[mid] + 1e-6)
-    if len(best) >= 3:
-        best = np.convolve(best, np.ones(3) / 3, mode="same")
+    if len(best) >= 5:                                       # smooth out jitter (edge-padded so a
+        best = np.convolve(np.pad(best, 2, mode="edge"), np.ones(5) / 5, mode="valid")  # zoom at t=0 survives
     rate = np.log(np.clip(best, 1e-3, None))                 # >0 zoom in, <0 zoom out
-    zooming = (ratio < 0.78) & (np.abs(rate) > np.log(1.01))   # scaling must genuinely help
+    zooming = (ratio < 0.8) & (np.abs(rate) > np.log(1.012))  # scaling must genuinely help
     dt = 1.0 / analyze_fps
     segs, run_start, gap = [], None, 0
     for i in range(len(rate)):
@@ -975,20 +973,33 @@ def detect_zoom(in_path, analyze_fps=6):
         segs.append((run_start, len(rate) - 1))
     out = []
     for a, b in segs:
-        if (b - a + 1) * dt < 0.6:                           # too short to be a deliberate zoom
+        seg = rate[a:b + 1]
+        if (b - a + 1) * dt < 0.8:                           # deliberate zooms last a moment
             continue
-        net = float(np.sum(rate[a:b + 1]))                   # net directional scale change
-        if abs(net) < np.log(1.12):                          # < ~12% total -> handheld drift, not a zoom
+        net = float(np.sum(seg))
+        if abs(net) < np.log(1.20):                          # < ~20% total -> drift/dolly wobble, not a zoom
             continue
-        speed = abs(net) / ((b - a + 1) * dt)                # log-scale per second
-        out.append((a * dt, (b + 1) * dt, speed))
+        if np.mean(np.sign(seg) == np.sign(net)) < 0.75:     # must be monotonic, not back-and-forth shake
+            continue
+        out.append((a * dt, (b + 1) * dt, abs(net) / ((b - a + 1) * dt)))
     return out
 
 
+def _movavg(x, k):
+    """Simple box moving average (used as a crude low-pass on 1D audio)."""
+    if k < 2:
+        return x
+    return np.convolve(x, np.ones(k, np.float32) / k, mode="same")
+
+
 def synth_motor_track(total_dur, intervals, sr=48000, intensity=0.5, seed=7):
-    """Synthesize a mono motor-whir track: a buzzy harmonic tone (servo + gear mesh)
-    plus mechanical noise, enveloped over each zoom segment. The mic chain band-limits
-    and AGC-pumps it downstream, like a real built-in mic would."""
+    """Synthesize a mono zoom-motor track.
+
+    A real lens zoom motor is a steady LOW-PITCH mechanical whir, not a musical note, so
+    this is mostly band-limited mechanical noise (a soft 'vvvvv') with only a faint low
+    hum and slow gear roughness on top, and long smooth fades so there is no 'boing'. The
+    mic chain band-limits and AGC-pumps it downstream like a real built-in mic.
+    """
     rng = np.random.default_rng(seed)
     track = np.zeros(int(total_dur * sr) + sr, np.float32)
     for t0, t1, speed in intervals:
@@ -996,18 +1007,27 @@ def synth_motor_track(total_dur, intervals, sr=48000, intensity=0.5, seed=7):
         if n <= 0:
             continue
         t = np.arange(n) / sr
-        f0 = 130.0 + 45.0 * float(np.clip(speed, 0, 3))      # faster zoom -> slightly higher pitch
-        vib = 1.0 + 0.015 * np.sin(2 * np.pi * 7 * t)        # motor not perfectly steady
-        buzz = sum(np.sin(2 * np.pi * f0 * k * vib * t) / k for k in range(1, 7)) / 2.0
-        noise = rng.standard_normal(n).astype(np.float32) * 0.5
-        sig = (0.7 * buzz + 0.3 * noise).astype(np.float32)
-        env = np.ones(n, np.float32)                         # attack / release
-        a = min(n, int(0.06 * sr)); r = min(n, int(0.10 * sr))
-        env[:a] = np.linspace(0, 1, a); env[-r:] = np.linspace(1, 0, r)
-        sig *= env * intensity
-        s = int(t0 * sr)
-        m = min(n, len(track) - s)
-        track[s:s + m] += sig[:m]
+        # broadband mechanical whir: noise band-limited to a low band (~150-1500 Hz)
+        noise = rng.standard_normal(n).astype(np.float32)
+        low = _movavg(noise, 16)                              # low-pass ~1.5 kHz
+        whir = low - _movavg(low, 120)                        # remove rumble -> low/mid band
+        s = whir.std()
+        if s > 1e-6:
+            whir = whir / s
+        # faint, non-musical low hum (kept quiet so it is not a tone)
+        f0 = 90.0 + 20.0 * float(np.clip(speed, 0, 3))
+        hum = 0.18 * np.sin(2 * np.pi * f0 * t) + 0.08 * np.sin(2 * np.pi * 2.0 * f0 * t)
+        # slow random amplitude wobble (gear/load variation), NOT pitch vibrato
+        am = 1.0 + 0.3 * _movavg(rng.standard_normal(n).astype(np.float32), 400)
+        sig = (0.85 * whir + 0.35 * hum) * am
+        env = np.ones(n, np.float32)                          # long smooth fades (no onset thump)
+        a = min(n, int(0.18 * sr)); r = min(n, int(0.22 * sr))
+        env[:a] = 0.5 - 0.5 * np.cos(np.linspace(0, np.pi, a))
+        env[-r:] = 0.5 + 0.5 * np.cos(np.linspace(0, np.pi, r))
+        sig *= env * intensity * 0.6
+        st = int(t0 * sr)
+        m = min(n, len(track) - st)
+        track[st:st + m] += sig[:m]
     return np.clip(track, -1, 1)
 
 
@@ -1087,8 +1107,12 @@ def convert(
     strength: float = typer.Option(1.0, "--strength", "-s", min=0.0, max=1.5, help="Global intensity 0..1.5 (photo)."),
     datestamp: Optional[str] = typer.Option(None, "--datestamp", "-d", help="Orange corner date, e.g. 2002-07-04."),
     no_audio: bool = typer.Option(False, "--no-audio", help="Strip audio instead of degrading it (video)."),
-    zoom_sound: bool = typer.Option(True, "--zoom-sound/--no-zoom-sound",
-                                    help="Add zoom-motor whir when a zoom is detected (video)."),
+    zoom: Optional[str] = typer.Option(None, "--zoom",
+                                       help="Add a zoom-motor whir over time ranges, e.g. '2-4,7-8.5' (seconds), video."),
+    zoom_sound: bool = typer.Option(False, "--zoom-sound",
+                                    help="[WIP] also try to auto-detect zoom (unreliable; see README)."),
+    smear: str = typer.Option("classic", "--smear",
+                              help="CCD smear model: 'classic' (default) or 'physical' (WIP)."),
     seed: int = typer.Option(12345, "--seed", help="Noise RNG seed (photo)."),
     list_presets: bool = typer.Option(False, "--list", "-l", help="List all presets and exit."),
     _v: bool = typer.Option(False, "--version", callback=_version, is_eager=True, help="Show version and exit."),
@@ -1108,18 +1132,25 @@ def convert(
         vp = dict(VIDEO_PRESETS.get(preset, VIDEO_PRESETS["digicam_video"]))
         out = str(output) if output else str(input.with_suffix("")) + ".digicam" + vp["ext"]
         motor_wav = None
-        if zoom_sound and not no_audio and has_audio(str(input)):
-            with console.status("[cyan]scanning for zoom[/]", spinner="dots"):
-                segs = detect_zoom(str(input))
+        if not no_audio and has_audio(str(input)):
+            segs = []
+            if zoom:                                          # manual time ranges override detection
+                for part in zoom.split(","):
+                    if "-" in part:
+                        a, b = part.split("-", 1)
+                        segs.append((float(a), float(b), 0.5))
+            elif zoom_sound:
+                with console.status("[cyan]scanning for zoom[/]", spinner="dots"):
+                    segs = detect_zoom(str(input))
             if segs:
                 total = sum(b - a for a, b, _ in segs)
-                console.print(f"[cyan]zoom detected[/] {len(segs)} segment(s), {total:.1f}s "
-                              f"-> adding motor sound")
+                console.print(f"[cyan]zoom[/] {len(segs)} segment(s), {total:.1f}s -> adding motor sound")
                 motor_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
                 write_wav(motor_wav, synth_motor_track(media_duration(str(input)), segs,
                                                        intensity=vp.get("zoom_motor", 0.35)))
         try:
-            process_video(str(input), out, vp, datestamp, audio=not no_audio, motor_wav=motor_wav)
+            process_video(str(input), out, vp, datestamp, audio=not no_audio,
+                          motor_wav=motor_wav, smear_mode=smear)
         finally:
             if motor_wav:
                 os.unlink(motor_wav)
@@ -1140,7 +1171,7 @@ def convert(
             p["barrel"] = barrel
         out = str(output) if output else str(input.with_suffix("")) + ".digicam.jpg"
         with console.status("[bold cyan]developing photo[/]", spinner="dots"):
-            w, h = process_photo(str(input), out, p, datestamp, strength, seed)
+            w, h = process_photo(str(input), out, p, datestamp, strength, seed, smear_mode=smear)
         console.print(f"[green]wrote[/] {out}  [dim]{w}x{h}[/]")
         return
     else:
