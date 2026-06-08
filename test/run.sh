@@ -48,7 +48,7 @@ if [ ! -f test/src/piano_clip.mkv ]; then
   ffmpeg -y -f lavfi -i "testsrc2=s=1280x720:r=30:d=12" -ss 12 -t 12 -i test/src/piano.ogg \
     -c:v ffv1 -c:a pcm_s16le -ac 2 -ar 44100 -shortest test/src/piano_clip.mkv 2>/dev/null
 fi
-# Secondary: a real CC speech video (already lo-fi 11k mono — a real-world case).
+# Secondary: a real CC speech video (already lo-fi 11k mono - a real-world case).
 if [ ! -f test/src/test_clip_audio.mkv ]; then
   curl -s -A "$UA" -o test/src/speech_src.ogv \
     "https://upload.wikimedia.org/wikipedia/commons/f/f6/Demonstration_data_retention_at_BMVIT_speech_Hufsky_2_2007-06-07.ogv"

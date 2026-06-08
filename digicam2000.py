@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-digicam2000 — give photos, video and audio an authentic early-2000s digital-camera look.
+digicam2000: give photos, video and audio an authentic early-2000s digital-camera look.
 
 The pipeline is physically motivated: it reproduces the artifacts in the order a
 real CCD point-and-shoot produced them, so a lossless / RAW-quality input comes
@@ -12,7 +12,7 @@ Why these artifacts (the real causes):
                     than G -> colored fringes on high-contrast edges).
   * CCD sensor .... small pixels + low dynamic range -> highlights clip with a
                     soft bloom roll-off, shadows crush; saturated pixels leak
-                    charge down their column -> the classic VERTICAL PURPLE SMEAR.
+                    charge down their column -> the vertical purple smear.
   * Bayer CFA ..... one color per pixel, interpolated -> softening and
                     false-color "zipper" on fine edges.
   * Noise ......... photon shot noise (sigma ~ sqrt(signal)) + a read-noise floor
@@ -23,7 +23,7 @@ Why these artifacts (the real causes):
   * JPEG .......... moderate-to-low quality with 4:2:0 chroma subsampling ->
                     8x8 DCT blocking and chroma bleed.
 
-Photos run through a numpy pipeline (operations done in LINEAR light where the
+Photos run through a numpy pipeline (operations done in linear light where the
 physics demands it). Video is handed to ffmpeg with a matching filtergraph and a
 period-correct low-bitrate codec.
 
@@ -130,12 +130,12 @@ def light_source_map(lin):
     """Estimate where the actual light sources / blown highlights are.
 
     Two physical cues:
-      1. local *prominence* — a bright blob standing out against a darker surround
+      1. local prominence: a bright blob standing out against a darker surround
          (sun, lamp, specular glint). This is the key discriminator: an orange
-         sunset *sky* is bright everywhere, so it has low prominence and must NOT
+         sunset *sky* is bright everywhere, so it has low prominence and must not
          bloom, while the sun disk sitting in it does. The local average is taken
          over a large radius so even a big sun still stands out from sky+sea.
-      2. per-channel *saturation* — ANY channel near full well (a deep-orange sun
+      2. per-channel saturation: any channel near full well (a deep-orange sun
          saturates its red photosites even though blue is low), which is what
          physically triggers blooming/smear; it amplifies prominent cores.
     Returns (L, clip): L drives bloom, clip drives smear.
@@ -158,9 +158,9 @@ def light_source_map(lin):
 def highlight_bloom(lin, L, amount, sigma):
     """CCD halation / veiling glare, keyed to the light-source map.
 
-    Two scales: a tight halo (sigma) plus a wide, low-amplitude veil (4*sigma) —
-    that's how real lens glare actually spreads around the sun. The glow inherits
-    the source's own color, so a warm sun blooms warm.
+    Two scales: a tight halo (sigma) plus a wide, low-amplitude veil (4*sigma),
+    approximating how lens glare spreads around a bright source. The glow takes the
+    source's own color, so a warm sun blooms warm.
     """
     if amount <= 0:
         return lin
@@ -532,9 +532,9 @@ def draw_datestamp(img, text):
 # --------------------------------------------------------------------------- #
 def video_ca_radial(in_lbl, out_lbl, e, w, h):
     """Radial lateral CA for video: magnify the red plane and shrink the blue plane
-    about the center, so the color split is ZERO at center and grows toward the edges
-    — real lens behavior. (ffmpeg's rgbashift only does a uniform whole-frame shift,
-    which looks like an anaglyph; this avoids that.) `e` ~ 0.003 gives a couple px at
+    about the center, so the color split is zero at center and grows toward the edges,
+    like a real lens. ffmpeg's rgbashift only does a uniform whole-frame shift,
+    which looks like an anaglyph; this avoids that. `e` ~ 0.003 gives a couple px at
     the edge of a 640px frame.
     """
     rs, ss = 1.0 + e, 1.0 - e
@@ -666,8 +666,8 @@ def build_audio_graph(vp):
     """Audio chain in true capture order. Returns a filter_complex fragment ending in [a].
 
     Order matters: the mic's self-noise is analog, added at the mic/preamp BEFORE the
-    AGC. So hiss must be mixed in *before* compand — that's what makes the AGC actually
-    pump the noise floor up in quiet passages (the breathing artifact). The ADC's
+    AGC. Hiss is mixed in before compand, so the AGC pumps the noise floor up in quiet
+    passages (the breathing artifact). The ADC's
     bit-crush + sample-rate come AFTER the AGC, because quantization happens at the
     converter, downstream of the analog gain stage.
         mono -> +mic hiss -> band-limit -> AGC -> preamp clip -> ADC(bits+rate)
@@ -757,23 +757,23 @@ VID_EXT = {".mov", ".mp4", ".mkv", ".avi", ".webm", ".m4v", ".y4m", ".mts"}
 AUD_EXT = {".wav", ".mp3", ".flac", ".ogg", ".oga", ".m4a", ".aac", ".opus", ".wma"}
 
 PRESET_DESC = {  # photo
-    "digicam": "typical 2MP CCD digicam — warm, punchy (default)",
-    "kodak": "Kodak Color Science — warm, very saturated",
-    "sony": "Cyber-shot — neutral-cool, contrasty, sharp",
-    "canon": "PowerShot — clean, slightly warm, balanced",
-    "nikon": "Coolpix — crisp, slightly cool/green",
-    "fuji": "FinePix Super CCD — vivid, smooth highlights",
+    "digicam": "typical 2MP CCD digicam, warm, punchy (default)",
+    "kodak": "Kodak Color Science, warm, very saturated",
+    "sony": "Cyber-shot, neutral-cool, contrasty, sharp",
+    "canon": "PowerShot, clean, slightly warm, balanced",
+    "nikon": "Coolpix, crisp, slightly cool/green",
+    "fuji": "FinePix Super CCD, vivid, smooth highlights",
     "daylight": "generic outdoor CCD, punchy",
-    "flash": "harsh on-camera flash — hot center, dark falloff",
-    "lofi": "cheap / high-ISO indoor — noisy, soft",
+    "flash": "harsh on-camera flash, hot center, dark falloff",
+    "lofi": "cheap / high-ISO indoor, noisy, soft",
     "camcorder": "low-res soft video-still grab",
 }
 VIDEO_DESC = {
-    "digicam": "digicam movie mode — MJPEG 640x480 + IMA-ADPCM",
+    "digicam": "digicam movie mode, MJPEG 640x480 + IMA-ADPCM",
     "digicam_video": "same as digicam",
-    "sony": "Cyber-shot MPEG Movie — 320x240 @16fps",
-    "camcorder": "MiniDV — interlaced 720x480, low-light grain",
-    "mpeg_lofi": "low-bitrate MPEG-4 320x240 — heavy macroblocking",
+    "sony": "Cyber-shot MPEG Movie, 320x240 @16fps",
+    "camcorder": "MiniDV, interlaced 720x480, low-light grain",
+    "mpeg_lofi": "low-bitrate MPEG-4 320x240, heavy macroblocking",
 }
 
 app = typer.Typer(add_completion=False, no_args_is_help=True, rich_markup_mode="rich",
@@ -805,7 +805,7 @@ def convert(
     preset: str = typer.Option("digicam", "--preset", "-p", help="Look preset (see [b]--list[/b])."),
     mp: Optional[float] = typer.Option(None, "--mp", help="Target megapixels (photo)."),
     barrel: Optional[float] = typer.Option(None, "--barrel", help="Barrel distortion k (photo); ~0.02 subtle, 0 = off."),
-    strength: float = typer.Option(1.0, "--strength", "-s", min=0.0, max=1.5, help="Global intensity 0–1.5 (photo)."),
+    strength: float = typer.Option(1.0, "--strength", "-s", min=0.0, max=1.5, help="Global intensity 0..1.5 (photo)."),
     datestamp: Optional[str] = typer.Option(None, "--datestamp", "-d", help="Orange corner date, e.g. 2002-07-04."),
     no_audio: bool = typer.Option(False, "--no-audio", help="Strip audio instead of degrading it (video)."),
     seed: int = typer.Option(12345, "--seed", help="Noise RNG seed (photo)."),
