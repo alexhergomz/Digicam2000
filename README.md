@@ -39,16 +39,18 @@ Useful flags: `-p/--preset`, `-s/--strength 0..1.5` (photo), `--mp` (target mega
 
 ## Presets
 
-Photo camera profiles, based on the documented look of each brand:
+Photo camera profiles, modeled on a representative model of each brand. The lens column
+is the real 35mm-equivalent range of that camera, to help you frame (see below); the
+preset itself only changes the look, not the field of view.
 
-| preset | look |
-| --- | --- |
-| `digicam` (default) | typical 2 MP CCD: warm, punchy, balanced |
-| `kodak` | warm, very saturated, strong reds |
-| `sony` | neutral to cool, contrasty, heavily sharpened |
-| `canon` | clean, slightly warm, balanced |
-| `nikon` | crisp, slightly cool or green |
-| `fuji` | vivid, smooth highlight roll-off |
+| preset | modeled on | MP | lens (35mm-equiv) | max aperture | look |
+| --- | --- | --- | --- | --- | --- |
+| `digicam` (default) | typical 2 MP digicam | 2 | ~35-38 mm | f/2.8 | warm, punchy, balanced |
+| `kodak` | Kodak EasyShare DX4900 | 4 | 35-70 mm (2x) | f/2.8 | warm, very saturated, strong reds |
+| `sony` | Sony Cyber-shot DSC-P72 | 3.2 | 39-117 mm (3x) | f/2.8-5.2 | neutral to cool, contrasty, sharp |
+| `canon` | Canon PowerShot A70 | 3.2 | 35-105 mm (3x) | f/2.8-4.8 | clean, slightly warm, balanced |
+| `nikon` | Nikon Coolpix 885 | 3.2 | 38-114 mm (3x) | f/2.8-4.9 | crisp, slightly cool or green |
+| `fuji` | Fujifilm FinePix F601 | 3.1 | 36-108 mm (3x) | f/2.8 | vivid, smooth highlight roll-off |
 
 Photo scene modes: `daylight`, `flash` (hot center, dark falloff), `lofi` (noisy high ISO),
 `camcorder` (low-res still grab).
@@ -60,12 +62,13 @@ Video: `digicam` (MJPEG 640x480 movie mode with IMA-ADPCM audio), `sony` (Cyber-
 ## Matching a real camera (framing)
 
 digicam2000 changes the look, not the field of view (it only adds a small barrel distortion
-and a 4:3 crop), so framing is up to you when you shoot. Most early-2000s digicams were 4:3
-with a small sensor and a zoom that started near 35mm (35mm-equivalent) at the wide end and
-reached about 105mm at full zoom, around f/2.8 to f/4.9. The small sensor kept almost
-everything in focus, which phone cameras already match.
+and a 4:3 crop), so framing is up to you when you shoot. As the preset table shows, these
+cameras were 4:3 with small sensors and zooms from about 35-39mm (35mm-equivalent) at the
+wide end out to 105-117mm, around f/2.8 to f/4.9. The small sensor kept almost everything in
+focus, which phone cameras already match.
 
-Pick a focal length close to the camera you want to imitate:
+Match the wide end of the camera you picked above (most sit at 35 to 39mm), or zoom in for
+its tele end. On a phone:
 
 | you want | 35mm-equivalent | on an iPhone |
 | --- | --- | --- |
@@ -116,19 +119,18 @@ CA magnitude ([Imatest](https://www.imatest.com/docs/sfr_chromatic/)),
 
 ## Examples
 
-Source on the left, then `sony`, `mpeg_lofi`, `camcorder`:
+Source on the left, then `sony`, `mpeg_lofi`, `camcorder` (the hero clip above is the same
+for Big Buck Bunny):
 
 ![Tears of Steel comparison](examples/tos.gif)
 
-The GIFs are silent. Here are the rendered clips with their degraded audio (camcorder
-profile, with a date stamp):
+The GIFs are silent. The rendered clips keep the degraded audio; download or open them to
+hear it: [bbb.camcorder](examples/bbb.camcorder.mp4), [bbb.sony](examples/bbb.sony.mp4),
+[bbb.mpeg_lofi](examples/bbb.mpeg_lofi.mp4), [tos.camcorder](examples/tos.camcorder.mp4),
+[tos.sony](examples/tos.sony.mp4), [tos.mpeg_lofi](examples/tos.mpeg_lofi.mp4).
 
-<video src="https://raw.githubusercontent.com/alexhergomz/Digicam2000/main/examples/bbb.camcorder.mp4" controls width="420"></video>
-<video src="https://raw.githubusercontent.com/alexhergomz/Digicam2000/main/examples/tos.camcorder.mp4" controls width="420"></video>
-
-If the players do not load in your browser, the files are in
-[`examples/`](examples/): `bbb.{sony,mpeg_lofi,camcorder}.mp4`,
-`tos.{sony,mpeg_lofi,camcorder}.mp4`.
+(GitHub only plays video and audio inline when the file is uploaded as an attachment, not
+from a repo path, so these are links rather than inline players.)
 
 ### Audio
 
@@ -138,9 +140,7 @@ then `digicam` then `camcorder`:
 
 ![audio spectrograms](examples/audio/spectrogram.png)
 
-<audio src="https://raw.githubusercontent.com/alexhergomz/Digicam2000/main/examples/audio/piano.digicam.mp3" controls></audio>
-
-Clips: [original](examples/audio/piano.original.mp3),
+Listen: [original](examples/audio/piano.original.mp3),
 [digicam](examples/audio/piano.digicam.mp3),
 [camcorder](examples/audio/piano.camcorder.mp3),
 [sony](examples/audio/piano.sony.mp3).
