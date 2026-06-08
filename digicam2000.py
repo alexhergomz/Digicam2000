@@ -831,48 +831,81 @@ def _scale_about_center(img, c):
     return np.asarray(canvas, np.float32)
 
 
+def _translation(a, b):
+    """Integer (dx, dy) that best shifts `a` onto `b`, via phase correlation. Phase
+    correlation keys on the cross-power spectrum, which depends only on translation, so
+    this is robust and lets us separate handheld panning (pure translation) from zoom
+    (scale about the center)."""
+    A = np.fft.rfft2(a); B = np.fft.rfft2(b)
+    R = A * np.conj(B)
+    R /= np.abs(R) + 1e-6
+    c = np.fft.irfft2(R, s=a.shape)
+    dy, dx = np.unravel_index(int(np.argmax(c)), c.shape)
+    H, W = a.shape
+    if dy > H // 2: dy -= H
+    if dx > W // 2: dx -= W
+    return int(dx), int(dy)
+
+
 def detect_zoom(in_path, analyze_fps=6):
-    """Return a list of (start_s, end_s, speed) zoom segments, found by estimating the
-    per-frame scale change (content magnifying/shrinking about the center)."""
+    """Return a list of (start_s, end_s, speed) zoom segments.
+
+    For each frame pair we find the scale-about-center that best matches the next frame.
+    Two guards keep handheld motion, pans and shake from registering as zoom:
+      * the best scale must fit clearly better than no-scaling (ratio test) -- a pan or
+        translation is not improved by scaling, so it is rejected; and
+      * a kept segment must have a real, sustained directional scale change (the net
+        zoom over the segment exceeds a few percent) -- jitter alternates sign and
+        cancels out.
+    """
     W, H = 128, 72
     raw = subprocess.run(
         ["ffmpeg", "-v", "error", "-i", in_path, "-vf",
          f"fps={analyze_fps},scale={W}:{H},format=gray", "-f", "rawvideo", "-"],
         capture_output=True).stdout
     n = len(raw) // (W * H)
-    if n < 4:
+    if n < 5:
         return []
     frames = np.frombuffer(raw[:n * W * H], np.uint8).reshape(n, H, W).astype(np.float32)
-    cand = np.linspace(0.92, 1.08, 9)                         # inter-frame scale guesses
+    cand = np.linspace(0.94, 1.06, 7)                        # inter-frame scale guesses (1.0 = middle)
+    mid = len(cand) // 2
     y0, y1, x0, x1 = int(H * 0.25), int(H * 0.75), int(W * 0.25), int(W * 0.75)  # center window
     best = np.ones(n - 1, np.float32)
+    ratio = np.ones(n - 1, np.float32)                       # err(best scale) / err(no scale)
     for i in range(n - 1):
+        # remove handheld translation first: align frame i onto i+1 by the estimated
+        # shift, so the leftover only-improves-with-scaling part is the actual zoom.
+        dx, dy = _translation(frames[i], frames[i + 1])
+        a = np.roll(np.roll(frames[i], dy, axis=0), dx, axis=1)
         b = frames[i + 1][y0:y1, x0:x1]
-        err = [np.mean((_scale_about_center(frames[i], c)[y0:y1, x0:x1] - b) ** 2) for c in cand]
-        best[i] = cand[int(np.argmin(err))]
-    if len(best) >= 3:                                        # light smoothing
+        err = [np.mean((_scale_about_center(a, c)[y0:y1, x0:x1] - b) ** 2) for c in cand]
+        j = int(np.argmin(err))
+        best[i] = cand[j]
+        ratio[i] = err[j] / (err[mid] + 1e-6)
+    if len(best) >= 3:
         best = np.convolve(best, np.ones(3) / 3, mode="same")
     rate = np.log(np.clip(best, 1e-3, None))                 # >0 zoom in, <0 zoom out
-    zooming = np.abs(rate) > np.log(1.012)                   # ~1.2% per analysis frame
+    zooming = (ratio < 0.78) & (np.abs(rate) > np.log(1.01))   # scaling must genuinely help
     dt = 1.0 / analyze_fps
-    segs, i, gap = [], 0, 0
-    run_start = None
+    segs, run_start, gap = [], None, 0
     for i in range(len(rate)):
         if zooming[i]:
-            if run_start is None:
-                run_start = i
+            run_start = i if run_start is None else run_start
             gap = 0
         elif run_start is not None:
             gap += 1
-            if gap > 2:                                       # allow tiny gaps
+            if gap > 2:
                 segs.append((run_start, i - gap)); run_start = None
     if run_start is not None:
         segs.append((run_start, len(rate) - 1))
     out = []
     for a, b in segs:
-        if (b - a + 1) * dt < 0.25:                          # ignore blips
+        if (b - a + 1) * dt < 0.6:                           # too short to be a deliberate zoom
             continue
-        speed = float(np.mean(np.abs(rate[a:b + 1])) / dt)   # log-scale per second
+        net = float(np.sum(rate[a:b + 1]))                   # net directional scale change
+        if abs(net) < np.log(1.12):                          # < ~12% total -> handheld drift, not a zoom
+            continue
+        speed = abs(net) / ((b - a + 1) * dt)                # log-scale per second
         out.append((a * dt, (b + 1) * dt, speed))
     return out
 
