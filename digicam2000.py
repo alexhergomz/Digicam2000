@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-digicam2000 — give photos and video an authentic early-2000s digital-camera look.
+digicam2000 — give photos, video and audio an authentic early-2000s digital-camera look.
 
 The pipeline is physically motivated: it reproduces the artifacts in the order a
 real CCD point-and-shoot produced them, so a lossless / RAW-quality input comes
@@ -716,6 +716,26 @@ def process_video(in_path, out_path, vp, datestamp=None, audio=True):
     subprocess.run(cmd, check=True)
 
 
+def audio_ext(vp):
+    """File extension for an audio-only output, matching the preset's codec."""
+    return ".mp3" if vp["acodec"] == "libmp3lame" else ".wav"
+
+
+def process_audio(in_path, out_path, vp):
+    """Audio-only: run a source sound through the built-in-mic degradation chain
+    (mono -> hiss -> band-limit -> AGC -> ADC bit-crush/sample-rate) and encode with
+    the preset's period codec. Same chain used for a video's soundtrack."""
+    if not shutil.which("ffmpeg"):
+        sys.exit("ffmpeg not found on PATH (needed for audio).")
+    cmd = ["ffmpeg", "-y", "-i", in_path, "-filter_complex", build_audio_graph(vp),
+           "-map", "[a]", "-c:a", vp["acodec"], "-ar", str(vp["arate"]), "-ac", "1"]
+    if vp["acodec"] == "libmp3lame":
+        cmd += ["-b:a", vp.get("abitrate", "64k")]
+    cmd += [out_path]
+    print("  ffmpeg:", " ".join(cmd))
+    subprocess.run(cmd, check=True)
+
+
 def has_audio(path):
     try:
         out = subprocess.run(
@@ -734,6 +754,7 @@ import typer
 
 IMG_EXT = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 VID_EXT = {".mov", ".mp4", ".mkv", ".avi", ".webm", ".m4v", ".y4m", ".mts"}
+AUD_EXT = {".wav", ".mp3", ".flac", ".ogg", ".oga", ".m4a", ".aac", ".opus", ".wma"}
 
 PRESET_DESC = {  # photo
     "digicam": "typical 2MP CCD digicam — warm, punchy (default)",
@@ -756,7 +777,7 @@ VIDEO_DESC = {
 }
 
 app = typer.Typer(add_completion=False, no_args_is_help=True, rich_markup_mode="rich",
-                  help="Give photos and video an authentic early-2000s digital-camera look.")
+                  help="Give photos, video and audio an authentic early-2000s digital-camera look.")
 
 
 def _print_presets():
@@ -778,7 +799,7 @@ def _version(value: bool):
 @app.command()
 def convert(
     input: Optional[Path] = typer.Argument(
-        None, exists=True, dir_okay=False, help="Source image or video."),
+        None, exists=True, dir_okay=False, help="Source image, video, or audio file."),
     output: Optional[Path] = typer.Argument(
         None, help="Output path. Default: <input>.digicam.<ext>"),
     preset: str = typer.Option("digicam", "--preset", "-p", help="Look preset (see [b]--list[/b])."),
@@ -791,7 +812,7 @@ def convert(
     list_presets: bool = typer.Option(False, "--list", "-l", help="List all presets and exit."),
     _v: bool = typer.Option(False, "--version", callback=_version, is_eager=True, help="Show version and exit."),
 ):
-    """Convert an image or video to a 2000s digicam look (auto-detected by extension)."""
+    """Convert an image, video or audio file to a 2000s digicam look (auto-detected by extension)."""
     if list_presets:
         _print_presets()
         raise typer.Exit()
@@ -806,6 +827,13 @@ def convert(
         vp = dict(VIDEO_PRESETS.get(preset, VIDEO_PRESETS["digicam_video"]))
         out = str(output) if output else str(input.with_suffix("")) + ".digicam" + vp["ext"]
         process_video(str(input), out, vp, datestamp, audio=not no_audio)
+        typer.secho(f"wrote {out}", fg="green")
+    elif ext in AUD_EXT:
+        if preset not in VIDEO_PRESETS:
+            typer.secho(f"note: '{preset}' has no audio profile; using 'digicam_video'.", fg="yellow")
+        vp = dict(VIDEO_PRESETS.get(preset, VIDEO_PRESETS["digicam_video"]))
+        out = str(output) if output else str(input.with_suffix("")) + ".digicam" + audio_ext(vp)
+        process_audio(str(input), out, vp)
         typer.secho(f"wrote {out}", fg="green")
     elif ext in IMG_EXT:
         if preset not in PRESETS:

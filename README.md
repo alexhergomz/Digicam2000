@@ -8,9 +8,9 @@ order they actually happened in the imaging chain** (lens → sensor → in-came
 JPEG/codec). Feed it a clean, high-resolution source and the result is hard to tell from a
 genuine period clip; the worse the source, the more loss simply stacks.
 
-![examples](examples/showcase.png)
+![Big Buck Bunny — source → sony → mpeg_lofi → camcorder](examples/bbb.gif)
 
-*Source → `sony` / `mpeg_lofi` / `camcorder`, on two CC BY 3.0 Blender films.*
+*source → `sony` / `mpeg_lofi` / `camcorder` — and it does **photos, video, and audio**.*
 
 ---
 
@@ -104,14 +104,39 @@ realistic CA magnitude ([Imatest](https://www.imatest.com/docs/sfr_chromatic/)),
 
 ## Examples
 
-Rendered clips live in [`examples/`](examples/) (`bbb.*.mp4`, `tos.*.mp4`) and are shown in
-the montage above. Regenerate them with `bash examples/make_examples.sh`. Source footage is
-© Blender Foundation, **CC BY 3.0** — see [`examples/CREDITS.md`](examples/CREDITS.md).
+### Video
 
-`test/run.sh` downloads public test data (Kodak lossless suite, Wikimedia CC sun/piano/
-speech clips) and renders the validation montages used during development — useful if you
-want to verify the pipeline end-to-end.
+![Tears of Steel — source → sony → mpeg_lofi → camcorder](examples/tos.gif)
+
+GIFs are silent — the rendered clips have **degraded audio too**. Grab the MP4s
+(▶ with sound): [`bbb.camcorder`](examples/bbb.camcorder.mp4) ·
+[`bbb.sony`](examples/bbb.sony.mp4) · [`tos.camcorder`](examples/tos.camcorder.mp4) ·
+[`tos.sony`](examples/tos.sony.mp4) — and the rest in [`examples/`](examples/).
+
+### Audio
+
+It degrades sound alone, through the same built-in-mic chain (mono → hiss →
+band-limit → AGC pumping → ADC bit-crush). On a public-domain Beethoven recording:
+
+![audio spectrograms: original vs digicam vs camcorder](examples/audio/spectrogram.png)
+
+▶ [original](examples/audio/piano.original.mp3) ·
+[digicam](examples/audio/piano.digicam.mp3) ·
+[camcorder](examples/audio/piano.camcorder.mp3) ·
+[sony](examples/audio/piano.sony.mp3)
+
+```bash
+digicam2000 song.wav -p digicam      # -> song.digicam.wav  (11 kHz, AGC-pumped, gritty)
+```
+
+### Reproduce
+
+`bash examples/make_examples.sh` rebuilds the video examples (CC BY 3.0 Blender films,
+fetched on the fly — see [`examples/CREDITS.md`](examples/CREDITS.md)). `bash test/run.sh`
+downloads public test data (Kodak suite, Wikimedia CC clips) and renders the development
+validation montages.
 
 ## License
 
-[MIT](LICENSE). Example footage is CC BY 3.0, © Blender Foundation.
+[MIT](LICENSE). Example video is CC BY 3.0 © Blender Foundation; the audio example is
+public domain — see [`examples/CREDITS.md`](examples/CREDITS.md).
