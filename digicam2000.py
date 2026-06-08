@@ -202,6 +202,29 @@ def ccd_smear(lin, clip, amount, mode="classic"):
     return lin + (streak * amount)[..., None] * tint
 
 
+def purple_fringe(lin, clip, amount):
+    """Brightness-dependent chromatic fringing: the purple/magenta halo a cheap lens
+    throws onto a high-contrast edge that borders a blown-out highlight.
+
+    This is a different mechanism from the lateral CA in lens_distort_ca. Lateral CA is
+    geometric -- a radial, brightness-independent colour split that grows with field
+    height. Purple fringing is axial (longitudinal) CA plus a little sensor blooming, so
+    it appears ONLY where a dark edge meets an overexposed area and scales with the local
+    contrast and the highlight's brightness. We key it to the saturation/clip map: how
+    close a pixel is to a blown highlight, times the local edge gradient, tinted violet.
+    That makes it strictly brightness/contrast-dependent, as the physics requires."""
+    if amount <= 0:
+        return lin
+    near = gauss_blur(np.clip(clip, 0, 1)[..., None], 3.0)[..., 0]   # proximity to a blown highlight
+    lum = lin.mean(2)
+    gx = np.abs(np.gradient(lum, axis=1))
+    gy = np.abs(np.gradient(lum, axis=0))
+    edge = np.clip((gx + gy) * 4.0, 0, 1)                            # local contrast
+    fringe = (near * edge)[..., None]
+    tint = np.array([0.6, 0.0, 1.0], np.float32)                     # violet/magenta
+    return np.clip(lin + fringe * amount * 0.15 * tint, 0, None)
+
+
 def bayer_emulate(lin, strength):
     """Mosaic to an RGGB Bayer grid then interpolate back -> CFA softening + false color."""
     if strength <= 0:
@@ -347,6 +370,45 @@ def tone_banding(x, levels):
 # --------------------------------------------------------------------------- #
 # presets
 # --------------------------------------------------------------------------- #
+def iso_sensor_defaults(iso):
+    """Physically-motivated static-defect levels (hot pixels, FPN, purple-fringe) for a
+    given ISO/gain, so EVERY preset carries the sensor tells, scaled by how the camera
+    was pushed -- not just the night preset.
+
+    The unifying factor is analog gain. A high ISO applies more gain to the same dark
+    frame, so the additive dark-current family is amplified and more of it crosses the
+    visible threshold:
+      * hot/stuck pixels -- anomalous dark current; their count and brightness rise with
+        gain and integration time (dark current roughly doubles every 6-8 C and is
+        multiplied by ISO). Additive, so they read out of the shadows, not the highlights.
+      * FPN -- its dark-offset term (DSNU) scales with the same gain; the multiplicative
+        PRNU term is ~constant, so total FPN grows sub-linearly (sqrt-ish) with gain.
+      * purple fringe -- a cheap-lens/contrast effect, not a gain effect, so it is derived
+        from the lens CA elsewhere, not here.
+    Anchored so ISO 100 is a clean daylight frame (a couple of near-invisible defects) and
+    ISO 800 is a murky high-gain/long exposure. (Refs: photon-transfer + dark-current and
+    PRNU/DSNU literature.)"""
+    g = iso / 100.0
+    hot_px = round(4.0 * g, 1)                                # defects/megapixel, ~prop. to gain
+    hot_amt = round(min(0.95, 0.55 + 0.13 * np.log2(max(1.0, g))), 2)
+    fpn = round(0.02 * (g ** 0.5), 3)                         # DSNU-dominated -> sqrt with gain
+    return hot_px, hot_amt, fpn
+
+
+def _fill_sensor_defects(presets, kind):
+    """Give every preset the ISO-scaled static defects, without clobbering any a preset
+    set explicitly (e.g. the night presets keep their hand-tuned values). For photos we
+    also derive a brightness-dependent purple-fringe amount from the lens CA."""
+    for p in presets.values():
+        iso = p.setdefault("iso", 100)
+        hp, ha, fp = iso_sensor_defaults(iso)
+        p.setdefault("hot_px", hp)
+        p.setdefault("hot_amt", ha)
+        p.setdefault("fpn", fp)
+        if kind == "photo":
+            p.setdefault("fringe", round(min(0.5, p.get("ca", 0.0) * 200.0), 3))
+
+
 PRESETS = {
     # Outdoor daylight: punchy CCD color, mild everything, warm auto-WB.
     "daylight": dict(
@@ -373,7 +435,7 @@ PRESETS = {
         bayer=0.9, noise_lum=0.035, noise_chroma=0.14, chroma_nr=0.5,
         wb=(1.05, 1.0, 0.9), knee=0.8, sat=1.15, skin_magenta=0.6,
         contrast=0.18, black=0.04, sharpen=1.2, sharpen_sigma=1.1,
-        jpeg_q=68, jpeg_passes=2, fmt="420",
+        jpeg_q=68, jpeg_passes=2, fmt="420", iso=400,
     ),
     # Camcorder-still grab: low res, soft, heavy chroma loss.
     "camcorder": dict(
@@ -382,7 +444,7 @@ PRESETS = {
         bayer=0.6, noise_lum=0.025, noise_chroma=0.12, chroma_nr=0.7,
         wb=(1.04, 1.0, 0.95), knee=0.8, sat=1.2, skin_magenta=0.5,
         contrast=0.2, black=0.03, sharpen=0.6, sharpen_sigma=1.2,
-        jpeg_q=72, jpeg_passes=1, fmt="420",
+        jpeg_q=72, jpeg_passes=1, fmt="420", iso=200,
     ),
 
     # --- Camera profiles: modeled on documented signatures of real ~2002 digicams ---
@@ -451,7 +513,7 @@ PRESETS = {
         bayer=0.8, noise_lum=0.05, noise_chroma=0.18, chroma_nr=0.45,
         wb=(1.18, 1.0, 0.78), knee=0.82, sat=1.1, skin_magenta=0.5,
         contrast=0.16, black=0.06, sharpen=0.7, sharpen_sigma=1.1,
-        jpeg_q=70, jpeg_passes=1, fmt="420",
+        jpeg_q=70, jpeg_passes=1, fmt="420", iso=800,
         hot_px=60, hot_amt=0.9, fpn=0.06, bands=72,
     ),
 }
@@ -482,12 +544,33 @@ VIDEO_PRESETS = {
                       interlace=True, ca=0.0025, vignette=0.4, noise=20, soft=0.5, mblur=1, bloom=0.30, smear=0.6,
                       dr_curve="0/0.06 0.10/0.12 0.80/0.85 1/1",   # low-light AGC: lift shadows to noisy murk (not clean black)
                       sat=1.2, contrast=1.12, warm=0.05, sharp=0.5, chroma="yuv411p",
+                      iso=400, hot_px=40, hot_amt=0.7, fpn=0.05,    # mild static defects (lifted shadows show them)
                       arate=32000, ahp=90, alp=13000, abits=0, ahiss=0.003,
                       aagc="med", adrive=0.0, acodec="pcm_s16le", zoom_motor=0.6),
+    # Night / low-light CCD video: long integration time -> AGC gains up, so dark current
+    # crosses threshold (static hot pixels), readout FPN shows in the lifted shadows, and
+    # every light source blooms/smears hard. MJPEG 640x480 like a digicam movie mode.
+    "night": dict(w=640, h=480, fps=15, codec="mjpeg", qv=10, ext=".avi",
+                  interlace=False, ca=0.0035, vignette=0.55, noise=26, soft=0.6, mblur=4, bloom=0.5, smear=0.72,
+                  dr_curve="0/0.05 0.10/0.15 0.74/0.88 1/1",   # lift shadows into noisy murk (AGC gain-up)
+                  sat=1.05, contrast=1.05, warm=0.10, sharp=0.4, chroma="yuvj420p", iso=800,
+                  hot_px=90, hot_amt=0.95, fpn=0.11,            # the low-light tells: defects + stripes
+                  arate=11025, ahp=250, alp=6000, abits=8, ahiss=0.008,
+                  aagc="strong", adrive=2.5, acodec="adpcm_ima_wav"),
+    # VHS camcorder dubbed to tape: 640x480 interlaced, but recorded to VHS, so colour
+    # bandwidth collapses + bleeds, luma softens, and a head-switch noise band sits at the
+    # foot of the frame. Hi-fi-ish but wobbly audio (transport wow/flutter + hiss).
+    "vhs": dict(w=640, h=480, fps=30000 / 1001, codec="mpeg4", qv=None, bitrate="1500k", ext=".avi",
+                interlace=True, ca=0.0025, vignette=0.42, noise=18, soft=0.5, mblur=1, bloom=0.28, smear=0.55,
+                dr_curve="0/0.05 0.10/0.12 0.80/0.86 1/1",
+                sat=1.06, contrast=1.08, warm=0.04, sharp=0.35, chroma="yuv420p",
+                iso=400, vhs=True, hot_px=25, hot_amt=0.6, fpn=0.04,
+                arate=32000, ahp=80, alp=11000, abits=0, ahiss=0.005, awow=0.06,
+                aagc="med", adrive=0.5, acodec="libmp3lame", abitrate="96k"),
     # Low-bitrate MPEG (early SD card / web clip): heavy macroblocking + warbly low-rate MP3.
     "mpeg_lofi": dict(w=320, h=240, fps=15, codec="mpeg4", qv=None, bitrate="320k", ext=".avi",
                       interlace=False, ca=0.004, vignette=0.5, noise=16, soft=0.6, mblur=3, bloom=0.25, smear=0.6,
-                      sat=1.12, contrast=1.1, warm=0.07, sharp=0.5, chroma="yuv420p",
+                      sat=1.12, contrast=1.1, warm=0.07, sharp=0.5, chroma="yuv420p", iso=200,
                       arate=22050, ahp=200, alp=8000, abits=0, ahiss=0.004,
                       aagc="med", adrive=1.0, acodec="libmp3lame", abitrate="56k"),
 
@@ -506,6 +589,26 @@ VIDEO_PRESETS = {
                  aagc="med", adrive=1.0, acodec="libmp3lame", abitrate="64k"),
 }
 
+# Every preset now carries the ISO-scaled static sensor defects (hot pixels, FPN) and,
+# for photos, a brightness-dependent purple-fringe amount -- faint at ISO 100, strong at
+# ISO 800 -- so the sensor tells are always present and physically coupled, not bolted on
+# to one preset. Presets that set values explicitly keep them.
+_fill_sensor_defects(PRESETS, "photo")
+_fill_sensor_defects(VIDEO_PRESETS, "video")
+
+
+# Lighting / white-balance casts: the residual colour error a weak auto-WB left behind
+# under a non-daylight source. These are per-channel linear gains (an illuminant tint),
+# applied in the ISP white-balance stage exactly like the preset's own `wb`.
+#   tungsten   : incandescent bulbs ~3200K; AWB under-corrects -> warm orange residue.
+#   fluorescent: tubes spike in green; AWB can't fully null it -> green/cyan cast.
+#   shade/blue : open shade ~7500K; AWB over-warms a cool scene -> cold blue residue.
+CAST_MULT = {
+    "tungsten":    (1.12, 1.00, 0.82),
+    "fluorescent": (0.95, 1.07, 0.97),
+    "shade":       (0.90, 0.98, 1.14),
+}
+
 
 # --------------------------------------------------------------------------- #
 # photo driver
@@ -522,7 +625,8 @@ def downscale_linear(lin, out_w, out_h):
     return np.stack(chans, -1).astype(np.float32)
 
 
-def process_photo(in_path, out_path, p, datestamp=None, strength=1.0, seed=12345, smear_mode="classic"):
+def process_photo(in_path, out_path, p, datestamp=None, strength=1.0, seed=12345,
+                  smear_mode="classic", cast=None):
     img = Image.open(in_path).convert("RGB")
     W0, H0 = img.size
 
@@ -563,6 +667,7 @@ def process_photo(in_path, out_path, p, datestamp=None, strength=1.0, seed=12345
     L, clip = light_source_map(lin)
     lin = highlight_bloom(lin, L, amt(p["bloom_amt"]), p["bloom_sigma"])
     lin = ccd_smear(lin, clip, amt(p["smear"]), smear_mode)
+    lin = purple_fringe(lin, clip, amt(p.get("fringe", 0.0)))             # brightness-dependent CA fringe
     lin = highlight_knee(lin, p["knee"])                                  # full-well roll-off (pre-WB)
     lin = add_noise(lin, amt(p["noise_lum"]), amt(p["noise_chroma"]), rng)
     lin = fixed_pattern_noise(lin, rng, amt(p.get("fpn", 0.0)))        # readout stripe pattern
@@ -571,6 +676,8 @@ def process_photo(in_path, out_path, p, datestamp=None, strength=1.0, seed=12345
 
     # --- (e) ISP: white balance, then display-referred color/tone/NR/sharpen ---
     lin = lin * np.array(p["wb"], np.float32)
+    if cast in CAST_MULT:                                  # residual illuminant cast (weak AWB)
+        lin = lin * np.array(CAST_MULT[cast], np.float32)
     x = linear_to_srgb(lin)
     x = saturate(x, 1 + (p["sat"] - 1) * strength, p["skin_magenta"])
     x = s_curve(x, p["contrast"] * strength, p["black"])
@@ -665,12 +772,137 @@ def video_smear(in_lbl, out_lbl, amount, h, mode="classic"):
             f"[sm0][smt]blend=all_mode=screen:all_opacity={amount}[{out_lbl}]")
 
 
+def _hot_overlay_img(path, w, h, density, amount, seed):
+    """Render the static hot/stuck-pixel defect map as a black RGB PNG (bright dots
+    on black) to be ADDED over every video frame (blend=addition).
+
+    The whole point is staticness: the same sensels are defective in every frame, so
+    the defects sit in fixed positions, exactly like a given CCD's permanent defect
+    map. Per-frame moving 'noise' (added later) can never reproduce that, and the
+    fixed dots are the strongest tell that footage came off a real sensor. Most
+    visible in the shadows (the added charge is swamped by signal in the highlights)."""
+    rng = np.random.default_rng(seed)
+    canvas = np.zeros((h, w, 3), np.float32)
+    n = max(1, int(round(density * (h * w) / 1e6)))
+    ys = rng.integers(0, h, n); xs = rng.integers(0, w, n)
+    mag = np.clip(amount * (0.5 + rng.random(n)), 0, 1).astype(np.float32)
+    ch = rng.integers(0, 3, n)
+    stuck = rng.random(n) < 0.6                            # 60% single-channel, 40% white-hot
+    for k in range(n):
+        if stuck[k]:
+            canvas[ys[k], xs[k], ch[k]] = mag[k]
+        else:
+            canvas[ys[k], xs[k], :] = mag[k]
+    Image.fromarray((canvas * 255 + 0.5).astype(np.uint8), "RGB").save(path)
+
+
+def _fpn_overlay_img(path, w, h, amount, seed):
+    """Render the static fixed-pattern-noise stripe map as a mid-gray (128) RGB PNG.
+
+    Per-column offset (the dominant CCD term: each column clocks out through its own
+    path) plus a weaker per-row term, centered on neutral gray so blend=grainmerge
+    adds it (out = frame + dev). Frame-constant, so it reads as a stationary stripe
+    texture in flat shadows/skies, the way real readout FPN does, not as grain."""
+    rng = np.random.default_rng(seed + 1)
+    col = rng.standard_normal(w).astype(np.float32) * amount * 14.0
+    row = rng.standard_normal(h).astype(np.float32) * amount * 4.0
+    dev = col[None, :] + row[:, None]
+    gray = np.clip(128.0 + dev, 0, 255)
+    Image.fromarray(np.repeat(gray[:, :, None], 3, 2).astype(np.uint8), "RGB").save(path)
+
+
+def _headswitch_img(path, w, band, seed):
+    """Render the VHS head-switching noise band: a torn strip of harsh monochrome
+    hash that sits at the very bottom of the frame.
+
+    On VHS the two video heads hand off near the bottom of each field, and the few
+    lines around the switch point can't be tracked, so they fill with the noise the
+    head reads off un-recorded tape. It's a fixed band at the picture's foot. Faded
+    upward so its top edge ramps into the image instead of a hard line."""
+    rng = np.random.default_rng(seed + 2)
+    noise = rng.integers(0, 256, (band, w), dtype=np.uint8).astype(np.float32)
+    ramp = np.clip(np.linspace(0.0, 1.0, band) * 1.6, 0, 1)[:, None]   # fade in from the top edge
+    img = (noise * ramp).astype(np.uint8)
+    Image.fromarray(np.repeat(img[:, :, None], 3, 2), "RGB").save(path)
+
+
+def build_vhs_stmts(in_lbl, out_lbl, w, h, hsw_png=None):
+    """VHS tape-recording degradation, applied AFTER the camera ISP/overlay (the tape
+    records an already-finished video signal, then plays it back imperfectly):
+
+      * chroma bandwidth collapse + bleed: VHS records colour at a fraction of luma
+        resolution, so colour is smeared horizontally and misregistered from luma
+        (downscale the Cb/Cr planes hard, then shift them),
+      * luma horizontal softness (lower luma bandwidth than broadcast),
+      * head-switching noise band at the foot of the frame.
+
+    Returns a list of filtergraph statements ending in [out_lbl]."""
+    cw = max(2, w // 10)                                    # collapsed chroma width (~1/10 luma)
+    s = [f"[{in_lbl}]format=yuv444p,extractplanes=y+u+v[vy][vu][vv];"
+         f"[vu]scale={cw}:{h}:flags=bilinear,scale={w}:{h}:flags=bilinear,setsar=1[vus];"
+         f"[vv]scale={cw}:{h}:flags=bilinear,scale={w}:{h}:flags=bilinear,setsar=1[vvs];"
+         f"[vy]setsar=1[vys];"
+         f"[vys][vus][vvs]mergeplanes=0x001020:yuv444p,"
+         f"chromashift=crh=4:cbh=-3,"                       # colour misregistered from luma
+         f"gblur=sigma=0.8:sigmaV=0[vtape]"]                # horizontal-only luma softness
+    cur = "vtape"
+    if hsw_png:
+        s.append(f"movie='{hsw_png}':loop=0,setpts=N/(FRAME_RATE*TB),format=rgb24,setsar=1[hsw];"
+                 f"[{cur}]format=rgb24,setsar=1[vtb];"
+                 f"[vtb][hsw]overlay=0:H-h:shortest=1[{out_lbl}]")
+    else:
+        s.append(f"[{cur}]copy[{out_lbl}]")
+    return s
+
+
+def _osd_font():
+    font = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
+    return f":fontfile={font}" if os.path.exists(font) else ""
+
+
+def build_osd_filters(vp):
+    """Burnt-in camcorder on-screen display (the chrome a camera drew over the picture
+    while recording, so it lives in the scan/overlay stage with the date stamp):
+      * a blinking red dot + REC top-left,
+      * a running timecode bottom-left,
+      * a battery gauge top-right (outline + terminal + charge bar),
+      * an orange clock under the battery.
+    All sized off the frame height so it scales across 320/640/720-wide presets."""
+    w, h = vp["w"], vp["h"]
+    u = h / 480.0                                          # scale unit (designed at 480 tall)
+    fs = max(12, int(h * 0.055))
+    fo = _osd_font()
+    sh = ":shadowcolor=black:shadowx=2:shadowy=2"
+    pad = int(24 * u)
+    bx = int(92 * u); bw = int(54 * u); bh = int(24 * u); by = int(26 * u)   # battery body geometry
+    rate = max(1, int(round(vp["fps"])))
+    return [
+        # blinking REC (on for the first half of each second)
+        f"drawtext=text='● REC'{fo}:fontcolor=red:fontsize={fs}:x={pad}:y={pad}"
+        f"{sh}:enable='lt(mod(t\\,1)\\,0.5)'",
+        # running timecode, bottom-left
+        f"drawtext=timecode='00\\:00\\:00\\:00':rate={rate}{fo}:fontcolor=white:fontsize={fs}"
+        f":x={pad}:y=h-th-{pad}{sh}",
+        # battery: outline body, positive terminal, then a charge bar inside
+        f"drawbox=x=iw-{bx}:y={by}:w={bw}:h={bh}:color=white:t={max(2, int(2 * u))}",
+        f"drawbox=x=iw-{bx - bw}:y={by + int(bh * 0.3)}:w={max(3, int(5 * u))}:h={int(bh * 0.4)}:color=white:t=fill",
+        f"drawbox=x=iw-{bx - int(5 * u)}:y={by + int(5 * u)}:w={int(bw * 0.6)}:h={bh - int(10 * u)}:color=white@0.85:t=fill",
+        # orange clock, under the battery
+        f"drawtext=text='PM 9\\:47'{fo}:fontcolor=orange:fontsize={int(fs * 0.85)}"
+        f":x=w-tw-{pad}:y={by + bh + int(10 * u)}{sh}",
+    ]
+
+
 def build_post_filters(vp, datestamp):
     """Filters AFTER bloom/smear, in imaging order:
         sensor (limited DR -> read noise) -> ISP (white balance -> sat/contrast ->
-        sharpen) -> scan/overlay (interlace, datestamp).
+        sharpen) -> scan/overlay (interlace, datestamp, OSD).
     Vignetting is optical and is done back in the geometry stage, not here."""
     h = vp["h"]
+    cm = CAST_MULT.get(vp.get("cast"))                                   # residual illuminant cast
+    wb = f"colorbalance=rm={vp['warm']}:bm=-{vp['warm']}"                # white balance first
+    if cm:
+        wb += f",colorchannelmixer=rr={cm[0]}:gg={cm[1]}:bb={cm[2]}"     # then the illuminant tint
     filters = [
         # --- sensor response ---
         # limited CCD dynamic range. Default crushes shadows + rolls highlights to kill
@@ -679,22 +911,23 @@ def build_post_filters(vp, datestamp):
         f"curves=master='{vp.get('dr_curve', '0/0 0.12/0.05 0.78/0.86 1/1')}'",
         f"noise=alls={vp['noise']}:allf=t+u",                           # read noise (before ISP sharpen)
         # --- ISP ---
-        f"colorbalance=rm={vp['warm']}:bm=-{vp['warm']}",                # white balance first
+        wb,
         f"eq=saturation={vp['sat']}:contrast={vp['contrast']}",         # then color matrix / tone
         f"unsharp=5:5:{vp['sharp']}:5:5:0.0",                            # sharpening (amplifies the noise above)
     ]
     if vp.get("interlace"):
         filters.append("interlace=scan=tff:lowpass=1")                  # combing on motion
     if datestamp:
-        font = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
-        fontopt = f":fontfile={font}" if os.path.exists(font) else ""
+        fontopt = _osd_font()
         filters.append(
             f"drawtext=text='{datestamp}'{fontopt}:fontcolor=orange:fontsize={max(14,int(h*0.05))}"
             f":x=w-tw-12:y=h-th-12:shadowcolor=0x802000:shadowx=1:shadowy=1")
+    if vp.get("osd"):
+        filters += build_osd_filters(vp)                                # camcorder OSD chrome
     return ",".join(filters)
 
 
-def build_video_graph(vp, datestamp, smear_mode="classic"):
+def build_video_graph(vp, datestamp, smear_mode="classic", hot_png=None, fpn_png=None, hsw_png=None):
     """Full video chain '[0:v]...[v]', in true imaging order:
 
         sampling/exposure -> OPTICS -> SENSOR -> ISP -> scan/encode
@@ -751,8 +984,28 @@ def build_video_graph(vp, datestamp, smear_mode="classic"):
     if vp.get("smear", 0) > 0:
         stmts.append(video_smear(cur, "smr", vp["smear"], h, smear_mode)); cur = "smr"
 
+    # --- sensor: STATIC defects -- fixed-pattern stripe noise + hot/stuck pixels ---
+    # Both are frame-constant (same pixels every frame), unlike the per-frame read noise
+    # added in the ISP block below. That staticness is the real CCD tell. The maps are
+    # generated once as PNGs and looped in via the movie source (no extra -i input):
+    # FPN is mid-gray and grainmerge-added (frame + dev); hot dots are black + addition.
+    if hot_png or fpn_png:
+        stmts.append(f"[{cur}]format=rgb24,setsar=1[sbase]"); cur = "sbase"
+        if fpn_png:
+            stmts.append(f"movie='{fpn_png}':loop=0,setpts=N/(FRAME_RATE*TB),format=rgb24,setsar=1[fpnov];"
+                         f"[{cur}][fpnov]blend=all_mode=grainmerge:shortest=1[fpnd]"); cur = "fpnd"
+        if hot_png:
+            stmts.append(f"movie='{hot_png}':loop=0,setpts=N/(FRAME_RATE*TB),format=rgb24,setsar=1[hotov];"
+                         f"[{cur}][hotov]blend=all_mode=addition:shortest=1[hotd]"); cur = "hotd"
+
     # --- sensor response + ISP + scan/overlay ---
-    stmts.append(f"[{cur}]{build_post_filters(vp, datestamp)}[v]")
+    # If a VHS stage follows, the ISP output is the signal "sent to the recorder", so
+    # post filters land on an intermediate label and the tape degradation produces [v].
+    if vp.get("vhs"):
+        stmts.append(f"[{cur}]{build_post_filters(vp, datestamp)}[pf]")
+        stmts += build_vhs_stmts("pf", "v", w, h, hsw_png)
+    else:
+        stmts.append(f"[{cur}]{build_post_filters(vp, datestamp)}[v]")
     return ";".join(stmts)
 
 
@@ -777,8 +1030,10 @@ def build_audio_graph(vp, motor=False):
         mix = "[m][mo][hs]amix=inputs=3:duration=first:dropout_transition=0:normalize=0[mix]"
     else:
         mix = "[m][hs]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mix]"
-    chain = [f"highpass=f={vp['ahp']}", f"lowpass=f={vp['alp']}",         # mic band (no bass/highs)
-             AGC_COMPAND[vp["aagc"]]]                                     # AGC pumps signal+hiss
+    chain = [f"highpass=f={vp['ahp']}", f"lowpass=f={vp['alp']}"]         # mic band (no bass/highs)
+    if vp.get("awow", 0) > 0:
+        chain.append(f"vibrato=f=5:d={vp['awow']}")                       # tape transport wow/flutter
+    chain.append(AGC_COMPAND[vp["aagc"]])                                 # AGC pumps signal+hiss
     if vp.get("adrive", 0) > 0:
         chain += [f"volume={vp['adrive']}dB", "alimiter=limit=0.97:level=disabled"]  # preamp clip
     if vp.get("abits"):
@@ -831,30 +1086,54 @@ def process_video(in_path, out_path, vp, datestamp=None, audio=True, motor_wav=N
     do_audio = audio and has_audio(in_path)
     use_motor = bool(motor_wav) and do_audio
 
-    graph = build_video_graph(vp, datestamp, smear_mode)
-    if do_audio:
-        graph += ";" + build_audio_graph(vp, motor=use_motor)
+    # Generate the static sensor-defect maps once (looped in by build_video_graph).
+    hot_png = fpn_png = None
+    tmp_pngs = []
+    if vp.get("hot_px"):
+        hot_png = tempfile.NamedTemporaryFile(suffix=".png", delete=False).name
+        _hot_overlay_img(hot_png, vp["w"], vp["h"], vp["hot_px"], vp.get("hot_amt", 0.8), seed=12345)
+        tmp_pngs.append(hot_png)
+    if vp.get("fpn"):
+        fpn_png = tempfile.NamedTemporaryFile(suffix=".png", delete=False).name
+        _fpn_overlay_img(fpn_png, vp["w"], vp["h"], vp["fpn"], seed=12345)
+        tmp_pngs.append(fpn_png)
+    hsw_png = None
+    if vp.get("vhs"):
+        hsw_png = tempfile.NamedTemporaryFile(suffix=".png", delete=False).name
+        _headswitch_img(hsw_png, vp["w"], max(6, int(vp["h"] * 0.05)), seed=12345)
+        tmp_pngs.append(hsw_png)
 
-    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", in_path]
-    if use_motor:
-        cmd += ["-i", motor_wav]                 # input 1: the zoom-motor track
-    cmd += ["-filter_complex", graph, "-map", "[v]",
-           "-aspect", "4:3",                       # force 4:3 display (DV/MPEG store the flag)
-           "-pix_fmt", vp["chroma"], "-c:v", vp["codec"]]
-    if vp["codec"] == "mjpeg":
-        cmd += ["-q:v", str(vp["qv"]), "-huffman", "optimal"]
-    elif vp["codec"] == "mpeg4":
-        cmd += (["-b:v", vp["bitrate"]] if vp.get("bitrate") else ["-q:v", "6"]) + ["-mbd", "rd"]
-    if vp.get("interlace"):
-        cmd += ["-flags", "+ilme+ildct"]
-    if do_audio:
-        cmd += ["-map", "[a]", "-c:a", vp["acodec"], "-ar", str(vp["arate"]), "-ac", "1"]
-        if vp["acodec"] == "libmp3lame":
-            cmd += ["-b:a", vp.get("abitrate", "64k")]
-    else:
-        cmd += ["-an"]
-    cmd += ["-progress", "pipe:1", "-nostats", out_path]
-    run_ffmpeg(cmd, "developing video", media_duration(in_path))
+    try:
+        graph = build_video_graph(vp, datestamp, smear_mode, hot_png, fpn_png, hsw_png)
+        if do_audio:
+            graph += ";" + build_audio_graph(vp, motor=use_motor)
+
+        cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", in_path]
+        if use_motor:
+            cmd += ["-i", motor_wav]                 # input 1: the zoom-motor track
+        cmd += ["-filter_complex", graph, "-map", "[v]",
+               "-aspect", "4:3",                       # force 4:3 display (DV/MPEG store the flag)
+               "-pix_fmt", vp["chroma"], "-c:v", vp["codec"]]
+        if vp["codec"] == "mjpeg":
+            cmd += ["-q:v", str(vp["qv"]), "-huffman", "optimal"]
+        elif vp["codec"] == "mpeg4":
+            cmd += (["-b:v", vp["bitrate"]] if vp.get("bitrate") else ["-q:v", "6"]) + ["-mbd", "rd"]
+        if vp.get("interlace"):
+            cmd += ["-flags", "+ilme+ildct"]
+        if do_audio:
+            cmd += ["-map", "[a]", "-c:a", vp["acodec"], "-ar", str(vp["arate"]), "-ac", "1"]
+            if vp["acodec"] == "libmp3lame":
+                cmd += ["-b:a", vp.get("abitrate", "64k")]
+        else:
+            cmd += ["-an"]
+        cmd += ["-progress", "pipe:1", "-nostats", out_path]
+        run_ffmpeg(cmd, "developing video", media_duration(in_path))
+    finally:
+        for t in tmp_pngs:
+            try:
+                os.unlink(t)
+            except OSError:
+                pass
 
 
 def audio_ext(vp):
@@ -1065,6 +1344,8 @@ VIDEO_DESC = {
     "sony": "Cyber-shot MPEG Movie, 320x240 @16fps",
     "camcorder": "MiniDV, interlaced 720x480, low-light grain",
     "mpeg_lofi": "low-bitrate MPEG-4 320x240, heavy macroblocking",
+    "night": "low-light CCD video, lifted murk, static hot pixels + FPN",
+    "vhs": "camcorder dubbed to VHS: chroma bleed, head-switch noise",
 }
 
 app = typer.Typer(add_completion=False, no_args_is_help=True, rich_markup_mode="rich",
@@ -1113,6 +1394,10 @@ def convert(
                                     help="[WIP] also try to auto-detect zoom (unreliable; see README)."),
     smear: str = typer.Option("classic", "--smear",
                               help="CCD smear model: 'classic' (default) or 'physical' (WIP)."),
+    osd: bool = typer.Option(False, "--osd",
+                             help="Burn in a camcorder OSD: blinking REC, timecode, battery, clock (video)."),
+    cast: Optional[str] = typer.Option(None, "--cast",
+                                       help="Light/WB cast: tungsten, fluorescent, or shade (photo + video)."),
     seed: int = typer.Option(12345, "--seed", help="Noise RNG seed (photo)."),
     list_presets: bool = typer.Option(False, "--list", "-l", help="List all presets and exit."),
     _v: bool = typer.Option(False, "--version", callback=_version, is_eager=True, help="Show version and exit."),
@@ -1124,12 +1409,20 @@ def convert(
     if input is None:
         typer.secho("Error: missing INPUT file (or pass --list to see presets).", fg="red", err=True)
         raise typer.Exit(2)
+    if cast is not None and cast not in CAST_MULT:
+        typer.secho(f"Error: unknown --cast '{cast}'. Choose from: {', '.join(CAST_MULT)}.",
+                    fg="red", err=True)
+        raise typer.Exit(2)
 
     ext = input.suffix.lower()
     if ext in VID_EXT:
         if preset not in VIDEO_PRESETS:
             typer.secho(f"note: '{preset}' has no video profile; using 'digicam_video'.", fg="yellow")
         vp = dict(VIDEO_PRESETS.get(preset, VIDEO_PRESETS["digicam_video"]))
+        if osd:
+            vp["osd"] = True
+        if cast:
+            vp["cast"] = cast
         out = str(output) if output else str(input.with_suffix("")) + ".digicam" + vp["ext"]
         motor_wav = None
         if not no_audio and has_audio(str(input)):
@@ -1171,7 +1464,8 @@ def convert(
             p["barrel"] = barrel
         out = str(output) if output else str(input.with_suffix("")) + ".digicam.jpg"
         with console.status("[bold cyan]developing photo[/]", spinner="dots"):
-            w, h = process_photo(str(input), out, p, datestamp, strength, seed, smear_mode=smear)
+            w, h = process_photo(str(input), out, p, datestamp, strength, seed,
+                                 smear_mode=smear, cast=cast)
         console.print(f"[green]wrote[/] {out}  [dim]{w}x{h}[/]")
         return
     else:

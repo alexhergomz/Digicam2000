@@ -36,7 +36,8 @@ digicam2000 --help
 The input type is detected from the extension. Default output is `<input>.digicam.<ext>`.
 Useful flags: `-p/--preset`, `-s/--strength 0..1.5` (photo), `--mp` (target megapixels),
 `-d/--datestamp`, `--no-audio`, `--zoom 2-4,7-8.5` (zoom-motor sound over time ranges),
-`--smear classic|physical`, `--barrel`. Video and audio show a progress bar.
+`--cast tungsten|fluorescent|shade` (light/white-balance cast), `--osd` (burnt-in camcorder
+display, video), `--smear classic|physical`, `--barrel`. Video and audio show a progress bar.
 
 ![digicam2000 CLI](docs/cli.svg)
 
@@ -56,11 +57,15 @@ preset itself only changes the look, not the field of view.
 | `fuji` | Fujifilm FinePix F601 | 3.1 | 36-108 mm (3x) | f/2.8 | vivid, smooth highlight roll-off |
 
 Photo scene modes: `daylight`, `flash` (hot center, dark falloff), `lofi` (noisy high ISO),
-`camcorder` (low-res still grab).
+`camcorder` (low-res still grab), `night` (long-exposure low-light: lifted murky blacks,
+heavy noise, hot pixels, readout stripes, banding).
 
 Video: `digicam` (MJPEG 640x480 movie mode with IMA-ADPCM audio), `sony` (Cyber-shot
 320x240 MPEG movie), `camcorder` (interlaced MiniDV 720x480 with low-light grain),
-`mpeg_lofi` (macroblocked 320x240 MPEG-4). Each degrades the soundtrack too.
+`mpeg_lofi` (macroblocked 320x240 MPEG-4), `night` (low-light CCD video: lifted murk plus
+static hot pixels and fixed-pattern noise), `vhs` (a camcorder dubbed to tape: chroma
+bleed, luma softening, a head-switching noise band at the foot of the frame, wow/flutter
+audio). Each degrades the soundtrack too.
 
 ## Matching a real camera (framing)
 
@@ -117,13 +122,18 @@ Each artifact maps to a real cause and runs at the right point in the chain:
 | stage | cause | effect |
 | --- | --- | --- |
 | Lens | cheap zoom optics, lateral CA, light falloff | mild barrel distortion, radial R/B fringing, vignetting |
+| Purple fringing | axial CA plus blooming at a blown-out edge | a violet halo only where a dark edge meets an overexposed area (grows with contrast and brightness, unlike the geometric lateral CA) |
 | CCD highlights | low dynamic range, halation | two-scale bloom and a soft highlight roll-off |
 | CCD smear | a saturated photosite leaks charge down its column | a vertical magenta/purple streak (classic; or white-to-purple with `--smear physical`) |
 | Bayer CFA | one color sampled per pixel, then interpolated | softening and false-color zipper on edges |
 | Noise | shot noise (sigma proportional to sqrt of signal) plus a read floor | signal-dependent grain, chroma blotches worst in shadows |
+| Static sensor defects | hot/stuck photosites (anomalous dark current), readout fixed-pattern noise (PRNU gain + DSNU offset) | fixed bright specks and a faint stationary stripe texture, in the same place every frame, scaled by ISO/gain |
 | In-camera ISP | weak auto white balance, punchy matrix, sharpening, chroma NR | color cast, oversaturation, edge halos, color smear |
+| Lighting cast | a non-daylight source the auto white balance could not fully correct | tungsten orange, fluorescent green, or open-shade blue residual tint (`--cast`) |
+| Camcorder OSD | the chrome a camcorder drew over the picture while recording | blinking REC dot, running timecode, battery gauge, orange clock (`--osd`) |
+| VHS tape | the recording medium plays back imperfectly | collapsed/bled color, softened luma, a head-switching noise band (`-p vhs`) |
 | JPEG / codec | low-quality 4:2:0, period video codecs | 8x8 blocking, chroma bleed, MJPEG / DV / MPEG |
-| Audio (video) | tiny mic, cheap ADC, AGC, zoom motor next to the mic | mono, band-limit, AGC pumping, hiss, bit-crush, zoom-motor whir |
+| Audio (video) | tiny mic, cheap ADC, AGC, zoom motor next to the mic, tape transport | mono, band-limit, AGC pumping, hiss, bit-crush, zoom-motor whir, tape wow/flutter |
 
 Details that keep it from looking like a modern clip with a filter:
 
@@ -131,6 +141,15 @@ Details that keep it from looking like a modern clip with a filter:
   bloom, smear, clipping and noise, then demosaic, then white balance, then tone and
   sharpening, then JPEG. Light-physics steps run in linear light; tone, color and sharpening
   run display-referred, like a real ISP.
+- The effects depend on the scene, not a flat overlay. Bloom and smear key off how bright
+  and prominent a highlight is; shot noise grows with the square root of the signal; the
+  fixed-pattern stripe has a multiplicative term that scales with signal (PRNU) and an
+  additive one that does not (DSNU); hot pixels are additive, so they read out of the
+  shadows and vanish in the highlights; purple fringing needs a blown edge. The static
+  defects (hot pixels, fixed-pattern noise) and the noise floor are all tied to one
+  physically motivated knob, the ISO/gain of the preset, so they grow together: a clean
+  ISO 100 daylight frame has a couple of near-invisible defects, while the ISO 800 `night`
+  preset is full of them.
 - Chromatic aberration is radial and small: zero at the center, a couple of pixels at the
   corners. It is not a uniform whole-frame color shift.
 - Bloom and smear are found by brightness and contrast (local prominence), so a lamp or a
