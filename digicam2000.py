@@ -41,8 +41,12 @@ from typing import Optional
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+from rich.console import Console
+from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn
+from rich.table import Table
 
 __version__ = "1.0.0"
+console = Console()
 
 # --------------------------------------------------------------------------- #
 # small numpy DSP helpers (no scipy)
@@ -687,6 +691,43 @@ def build_audio_graph(vp):
     return ";".join([mono, hiss, mix, final])
 
 
+def media_duration(path):
+    """Duration in seconds via ffprobe, or 0.0 if unknown."""
+    try:
+        out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                              "-of", "default=nk=1:nw=1", path], capture_output=True, text=True)
+        return float(out.stdout.strip())
+    except Exception:
+        return 0.0
+
+
+def run_ffmpeg(cmd, label, duration=0.0):
+    """Run ffmpeg and show a rich progress bar parsed from its -progress output.
+    `cmd` should already include: -hide_banner -loglevel error -progress pipe:1 -nostats."""
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+    cols = (TextColumn("[bold cyan]{task.description}"), BarColumn(bar_width=None),
+            TextColumn("{task.percentage:>3.0f}%"), TimeRemainingColumn())
+    with Progress(*cols, console=console, transient=True) as prog:
+        task = prog.add_task(label, total=duration or None)
+        for line in proc.stdout:
+            line = line.strip()
+            if line.startswith("out_time=") and duration:
+                t = line.split("=", 1)[1]
+                try:
+                    h, m, s = t.split(":")
+                    prog.update(task, completed=min(duration, int(h) * 3600 + int(m) * 60 + float(s)))
+                except Exception:
+                    pass
+            elif line == "progress=end":
+                prog.update(task, completed=duration or 1)
+    err = proc.stderr.read()
+    proc.wait()
+    if proc.returncode != 0:
+        console.print("[red]ffmpeg failed:[/red]")
+        console.print(err.strip())
+        sys.exit(1)
+
+
 def process_video(in_path, out_path, vp, datestamp=None, audio=True):
     if not shutil.which("ffmpeg"):
         sys.exit("ffmpeg not found on PATH (needed for video).")
@@ -696,7 +737,8 @@ def process_video(in_path, out_path, vp, datestamp=None, audio=True):
     if do_audio:
         graph += ";" + build_audio_graph(vp)
 
-    cmd = ["ffmpeg", "-y", "-i", in_path, "-filter_complex", graph, "-map", "[v]",
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", in_path,
+           "-filter_complex", graph, "-map", "[v]",
            "-aspect", "4:3",                       # force 4:3 display (DV/MPEG store the flag)
            "-pix_fmt", vp["chroma"], "-c:v", vp["codec"]]
     if vp["codec"] == "mjpeg":
@@ -711,9 +753,8 @@ def process_video(in_path, out_path, vp, datestamp=None, audio=True):
             cmd += ["-b:a", vp.get("abitrate", "64k")]
     else:
         cmd += ["-an"]
-    cmd += [out_path]
-    print("  ffmpeg:", " ".join(cmd))
-    subprocess.run(cmd, check=True)
+    cmd += ["-progress", "pipe:1", "-nostats", out_path]
+    run_ffmpeg(cmd, "developing video", media_duration(in_path))
 
 
 def audio_ext(vp):
@@ -727,13 +768,13 @@ def process_audio(in_path, out_path, vp):
     the preset's period codec. Same chain used for a video's soundtrack."""
     if not shutil.which("ffmpeg"):
         sys.exit("ffmpeg not found on PATH (needed for audio).")
-    cmd = ["ffmpeg", "-y", "-i", in_path, "-filter_complex", build_audio_graph(vp),
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", in_path,
+           "-filter_complex", build_audio_graph(vp),
            "-map", "[a]", "-c:a", vp["acodec"], "-ar", str(vp["arate"]), "-ac", "1"]
     if vp["acodec"] == "libmp3lame":
         cmd += ["-b:a", vp.get("abitrate", "64k")]
-    cmd += [out_path]
-    print("  ffmpeg:", " ".join(cmd))
-    subprocess.run(cmd, check=True)
+    cmd += ["-progress", "pipe:1", "-nostats", out_path]
+    run_ffmpeg(cmd, "developing audio", media_duration(in_path))
 
 
 def has_audio(path):
@@ -780,14 +821,22 @@ app = typer.Typer(add_completion=False, no_args_is_help=True, rich_markup_mode="
                   help="Give photos, video and audio an authentic early-2000s digital-camera look.")
 
 
+def _preset_table(title, names, desc):
+    table = Table(title=title, title_justify="left", title_style="bold",
+                  header_style="bold cyan", border_style="dim", pad_edge=False)
+    table.add_column("preset", style="green", no_wrap=True)
+    table.add_column("look")
+    for k in names:
+        table.add_row(k, desc.get(k, ""))
+    return table
+
+
 def _print_presets():
-    typer.secho("\nPhoto presets", bold=True)
-    for k in PRESETS:
-        typer.echo(f"  {k:14s} {PRESET_DESC.get(k, '')}")
-    typer.secho("\nVideo presets", bold=True)
-    for k in VIDEO_PRESETS:
-        typer.echo(f"  {k:14s} {VIDEO_DESC.get(k, '')}")
-    typer.echo("")
+    console.print()
+    console.print(_preset_table("Photo presets", PRESETS, PRESET_DESC))
+    console.print()
+    console.print(_preset_table("Video / audio presets", VIDEO_PRESETS, VIDEO_DESC))
+    console.print()
 
 
 def _version(value: bool):
@@ -827,14 +876,12 @@ def convert(
         vp = dict(VIDEO_PRESETS.get(preset, VIDEO_PRESETS["digicam_video"]))
         out = str(output) if output else str(input.with_suffix("")) + ".digicam" + vp["ext"]
         process_video(str(input), out, vp, datestamp, audio=not no_audio)
-        typer.secho(f"wrote {out}", fg="green")
     elif ext in AUD_EXT:
         if preset not in VIDEO_PRESETS:
             typer.secho(f"note: '{preset}' has no audio profile; using 'digicam_video'.", fg="yellow")
         vp = dict(VIDEO_PRESETS.get(preset, VIDEO_PRESETS["digicam_video"]))
         out = str(output) if output else str(input.with_suffix("")) + ".digicam" + audio_ext(vp)
         process_audio(str(input), out, vp)
-        typer.secho(f"wrote {out}", fg="green")
     elif ext in IMG_EXT:
         if preset not in PRESETS:
             typer.secho(f"Error: unknown photo preset '{preset}'. Try --list.", fg="red", err=True)
@@ -845,11 +892,14 @@ def convert(
         if barrel is not None:
             p["barrel"] = barrel
         out = str(output) if output else str(input.with_suffix("")) + ".digicam.jpg"
-        w, h = process_photo(str(input), out, p, datestamp, strength, seed)
-        typer.secho(f"wrote {out}  {w}x{h}", fg="green")
+        with console.status("[bold cyan]developing photo[/]", spinner="dots"):
+            w, h = process_photo(str(input), out, p, datestamp, strength, seed)
+        console.print(f"[green]wrote[/] {out}  [dim]{w}x{h}[/]")
+        return
     else:
         typer.secho(f"Error: unsupported file type '{ext}'.", fg="red", err=True)
         raise typer.Exit(2)
+    console.print(f"[green]wrote[/] {out}")
 
 
 if __name__ == "__main__":

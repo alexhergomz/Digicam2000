@@ -35,7 +35,9 @@ digicam2000 --help
 
 The input type is detected from the extension. Default output is `<input>.digicam.<ext>`.
 Useful flags: `-p/--preset`, `-s/--strength 0..1.5` (photo), `--mp` (target megapixels),
-`-d/--datestamp`, `--no-audio`, `--barrel`.
+`-d/--datestamp`, `--no-audio`, `--barrel`. Video and audio show a progress bar.
+
+![digicam2000 CLI](docs/cli.svg)
 
 ## Presets
 
@@ -79,6 +81,33 @@ its tele end. On a phone:
 Skip the 0.5x ultra-wide (about 13 mm); no digicam was that wide. The iPhone main lens is
 about 24 to 26 mm, slightly wider than a classic digicam, so the 35mm option on recent
 models (or a small crop) lands closest.
+
+## Best input (capture format)
+
+The effects look best applied to a clean, high-quality source, so the loss the tool adds
+is the only loss. Feed it the least-compressed file you can.
+
+On iPhone, the cleanest options are near-lossless and built in:
+
+- Video: record in **Apple ProRes** (iPhone 13 Pro and later, in Settings > Camera >
+  Formats). ProRes is intra-frame and near-lossless, so the filter runs on almost untouched
+  data. Use standard or HDR, not Log, so the source looks normal first. Files are large.
+- Photos: shoot **Apple ProRAW** (iPhone 12 Pro and later) and export to TIFF or PNG, or
+  just use the highest-quality HEIF.
+
+On Android (I do not have one to test, so treat these as pointers):
+
+- Photos: shoot **RAW / DNG** from the Pro mode (for example Samsung Expert RAW), then
+  export to TIFF or PNG.
+- Video: stock cameras rarely offer a lossless format; an app like **MotionCam** can record
+  RAW video (DNG, or transcoded to ProRes). Otherwise pick the highest-bitrate mode available.
+
+If you do not have any of these, a normal high-quality photo or video is still fine; you just
+start with a bit more compression underneath.
+
+Sources: [Apple, record ProRes](https://support.apple.com/guide/iphone/iphde02c478d/ios),
+[Apple, ProRAW](https://support.apple.com/en-ca/guide/iphone/iphae1e882a3/ios),
+[MotionCam RAW video](https://ymcinema.com/2024/07/09/meet-motioncam-real-raw-video-capture-from-android-phones/).
 
 ## How it works
 
