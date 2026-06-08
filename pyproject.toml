@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "digicam2000"
+version = "1.0.0"
+description = "Give photos and video an authentic early-2000s digital-camera look."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "alexhergomz" }]
+keywords = ["digicam", "ccd", "vintage", "y2k", "retro", "image-processing", "video", "ffmpeg"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Topic :: Multimedia :: Graphics",
+  "Topic :: Multimedia :: Video",
+  "Operating System :: OS Independent",
+]
+dependencies = ["numpy>=1.21", "pillow>=9", "typer>=0.9"]
+
+[project.urls]
+Homepage = "https://github.com/alexhergomz/Digicam2000"
+Repository = "https://github.com/alexhergomz/Digicam2000"
+
+[project.scripts]
+digicam2000 = "digicam2000:app"
+
+[tool.setuptools]
+py-modules = ["digicam2000"]
