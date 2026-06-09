@@ -931,9 +931,9 @@ def build_vhs_stmts(in_lbl, out_lbl, w, h, fps, hsw_png=None, hsw_seed=-1):
     # (time-base error is modelled up front in step 1 via displace, not here)
     if hsw_png:
         s.append(
-            f"color=c=gray:s={w}x{band}:r={r}:d=3600,"
+            f"color=c=gray:s={max(8, w // 8)}x{band}:r={r}:d=3600,"
             f"noise=alls=100:allf=t+u:all_seed={hsw_seed + 2},"
-            f"eq=contrast=2.2,format=gbrp,setsar=1[hnz];"   # harsh off-tape hash (noise caps at 100)
+            f"scale={w}:{band}:flags=bilinear,eq=contrast=2.2,format=gbrp,setsar=1[hnz];"  # streaky off-tape hash (narrow->wide)
             f"movie='{hsw_png}':loop=0,setpts=N/(FRAME_RATE*TB),format=gray,setsar=1[hramp];"
             f"[hnz][hramp]alphamerge[hband];"
             f"[{cur}][hband]overlay=0:H-h:shortest=1[vhsw]")
@@ -942,13 +942,16 @@ def build_vhs_stmts(in_lbl, out_lbl, w, h, fps, hsw_png=None, hsw_seed=-1):
         s.append(f"[{cur}]copy[vhsw]")
         cur = "vhsw"
     # 5. tracking disturbance: when the head wanders off the track (SAME envelope as the
-    #    time-base spike, so the jitter and the band coincide), the off-track read throws a
-    #    snowy band low in the frame, by the head-switch point. Present only in those windows.
-    trkH = max(10, int(round(h * 0.08)))
+    #    time-base spike, so jitter and noise coincide), the off-track read throws a band of
+    #    off-tape hash that ROLLS up the frame. Streaky like real off-tape noise -- generated
+    #    narrow and stretched horizontally (the read smears along scanlines), not round snow.
+    trkH = max(10, int(round(h * 0.055)))
     s.append(
-        f"color=c=gray:s={w}x{trkH}:r={r}:d=3600,"
-        f"noise=alls=100:allf=t+u:all_seed={hsw_seed + 3},eq=contrast=2.4,format=gbrp,setsar=1[trk];"
-        f"[{cur}][trk]overlay=0:{int(h - band - trkH)}:enable=gt({etl}\\,0.35):shortest=1[{out_lbl}]")
+        f"color=c=gray:s={max(8, w // 8)}x{trkH}:r={r}:d=3600,"
+        f"noise=alls=100:allf=t+u:all_seed={hsw_seed + 3},"
+        f"scale={w}:{trkH}:flags=bilinear,eq=contrast=2.6:brightness=0.06,format=gbrp,setsar=1[trk];"
+        f"[{cur}][trk]overlay=x=0:y=H-mod(t*{int(h * 1.15)}\\,{h + trkH}):eval=frame"
+        f":enable=gt({etl}\\,0.35):shortest=1[{out_lbl}]")
     return s
 
 
