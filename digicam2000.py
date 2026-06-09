@@ -532,6 +532,19 @@ PRESETS = {
         jpeg_q=70, jpeg_passes=1, fmt="420", iso=800,
         hot_px=60, hot_amt=0.9, fpn=0.06, bands=72,
     ),
+    # VHS still-frame grab: the "dubbed to tape" look on a single frame. Chroma
+    # bandwidth collapses + bleeds (heavy chroma NR + chroma noise), luma softens
+    # (low res, little sharpening), blacks lift to murk, colour desaturates with a
+    # faint cast, and tracking / head-switch FPN stripes sit across the frame.
+    "vhs": dict(
+        mp=0.32, barrel=0.02, ca=0.0022, vignette=0.42,
+        bloom_thresh=0.75, bloom_amt=0.5, bloom_sigma=7, smear=0.20,
+        bayer=0.6, noise_lum=0.022, noise_chroma=0.09, chroma_nr=0.82,
+        wb=(1.04, 1.02, 0.96), knee=0.86, sat=0.97, skin_magenta=0.4,
+        contrast=0.16, black=0.025, sharpen=0.4, sharpen_sigma=1.3,
+        jpeg_q=68, jpeg_passes=2, fmt="420", iso=200,
+        hot_px=14, hot_amt=0.4, fpn=0.04, bands=60,
+    ),
 }
 
 # AGC (automatic gain control) curves for compand: map input dB -> output dB.
@@ -893,6 +906,22 @@ def build_vhs_stmts(in_lbl, out_lbl, w, h, fps, hsw_png=None, hsw_seed=-1):
         f"format=gbrp,setsar=1[drp];"
         f"[{cur}][drp]blend=all_mode=screen:shortest=1[vdrop]")
     cur = "vdrop"
+    # time-base instability (always present, periodic): WOW/FLUTTER = the whole frame drifts
+    # side to side as tape speed wanders (slow wow + faster flutter); FLAGGING = the top lines
+    # lag/skew worst because the sync timing error is largest at the head of each field
+    # ("flag-waving"). Implemented as a moving crop over a slightly widened frame (so no black
+    # edges appear) plus an extra-displaced top strip overlaid back on.
+    m = max(6, int(round(w * 0.022)))                       # wow/flutter headroom (gentle: keeps bars legible)
+    mf = max(10, int(round(w * 0.06)))                      # flagging headroom (larger; more visible)
+    topH = max(6, int(round(h * 0.12)))                     # flagging disturbs the top ~12% of lines
+    wobX = f"({m}+{w*0.012:.2f}*sin(2*PI*0.27*t)+{w*0.004:.2f}*sin(2*PI*2.9*t+1))"
+    flagX = f"({mf}+{w*0.040:.2f}*sin(2*PI*0.8*t+0.7)+{w*0.012:.2f}*sin(2*PI*4.3*t))"
+    s.append(
+        f"[{cur}]scale={w + 2*m}:{h}:flags=bilinear,crop={w}:{h}:{wobX}:0,setsar=1[vwf];"
+        f"[vwf]split[vwfa][vwfb];"
+        f"[vwfb]crop={w}:{topH}:0:0,scale={w + 2*mf}:{topH}:flags=bilinear,crop={w}:{topH}:{flagX}:0,setsar=1[vtop];"
+        f"[vwfa][vtop]overlay=0:0:shortest=1[vtb]")
+    cur = "vtb"
     if hsw_png:
         s.append(
             f"color=c=gray:s={w}x{band}:r={r}:d=3600,"
@@ -900,9 +929,18 @@ def build_vhs_stmts(in_lbl, out_lbl, w, h, fps, hsw_png=None, hsw_seed=-1):
             f"eq=contrast=2.2,format=gbrp,setsar=1[hnz];"   # harsh off-tape hash (noise caps at 100)
             f"movie='{hsw_png}':loop=0,setpts=N/(FRAME_RATE*TB),format=gray,setsar=1[hramp];"
             f"[hnz][hramp]alphamerge[hband];"
-            f"[{cur}][hband]overlay=0:H-h:shortest=1[{out_lbl}]")
+            f"[{cur}][hband]overlay=0:H-h:shortest=1[vhsw]")
+        cur = "vhsw"
     else:
-        s.append(f"[{cur}]copy[{out_lbl}]")
+        s.append(f"[{cur}]copy[vhsw]")
+        cur = "vhsw"
+    # tracking error (periodic): head/track misalignment throws a snowy band that sweeps up
+    # the frame, drifting in and out of lock (visible only intermittently).
+    trkH = max(8, int(round(h * 0.06)))
+    s.append(
+        f"color=c=gray:s={w}x{trkH}:r={r}:d=3600,"
+        f"noise=alls=100:allf=t+u:all_seed={hsw_seed + 3},eq=contrast=2.4,format=gbrp,setsar=1[trk];"
+        f"[{cur}][trk]overlay=0:{int(h * 0.07)}:enable=lt(mod(t\\,9)\\,1.1):shortest=1[{out_lbl}]")
     return s
 
 
@@ -922,10 +960,12 @@ def build_osd_filters(vp):
     w, h = vp["w"], vp["h"]
     u = h / 480.0                                          # scale unit (designed at 480 tall)
     fs = max(12, int(h * 0.055))
+    cfs = max(11, int(fs * 0.58))                          # clock runs smaller than REC/timecode
     fo = _osd_font()
     sh = ":shadowcolor=black:shadowx=2:shadowy=2"
     pad = int(24 * u)
-    bx = int(92 * u); bw = int(54 * u); bh = int(24 * u); by = int(26 * u)   # battery body geometry
+    bw = int(34 * u); bh = int(15 * u); bx = int(90 * u); by = int(24 * u)   # compact battery (inset from edge so tape overscan/wobble doesn't clip it)
+    rpad = int(48 * u)                                     # right-side inset for battery+clock
     rate = max(1, int(round(vp["fps"])))
     return [
         # blinking REC (on for the first half of each second)
@@ -935,12 +975,13 @@ def build_osd_filters(vp):
         f"drawtext=timecode='00\\:00\\:00\\:00':rate={rate}{fo}:fontcolor=white:fontsize={fs}"
         f":x={pad}:y=h-th-{pad}{sh}",
         # battery: outline body, positive terminal, then a charge bar inside
-        f"drawbox=x=iw-{bx}:y={by}:w={bw}:h={bh}:color=white:t={max(2, int(2 * u))}",
-        f"drawbox=x=iw-{bx - bw}:y={by + int(bh * 0.3)}:w={max(3, int(5 * u))}:h={int(bh * 0.4)}:color=white:t=fill",
-        f"drawbox=x=iw-{bx - int(5 * u)}:y={by + int(5 * u)}:w={int(bw * 0.6)}:h={bh - int(10 * u)}:color=white@0.85:t=fill",
-        # orange clock, under the battery
-        f"drawtext=text='PM 9\\:47'{fo}:fontcolor=orange:fontsize={int(fs * 0.85)}"
-        f":x=w-tw-{pad}:y={by + bh + int(10 * u)}{sh}",
+        f"drawbox=x=iw-{bx}:y={by}:w={bw}:h={bh}:color=white:t={max(1, int(1.5 * u))}",
+        f"drawbox=x=iw-{bx - bw}:y={by + int(bh * 0.3)}:w={max(2, int(3 * u))}:h={int(bh * 0.4)}:color=white:t=fill",
+        f"drawbox=x=iw-{bx - int(3 * u)}:y={by + int(2.5 * u)}:w={int(bw * 0.62)}:h={bh - int(5 * u)}:color=white@0.85:t=fill",
+        # running wall clock: starts 03:00 AM and advances with the recording (gmtime base
+        # 97200 = 03:00:00; pts is added each frame). under the battery, right-aligned.
+        f"drawtext=text='%{{pts\\:gmtime\\:97200\\:%I\\\\\\:%M %p}}'{fo}:fontcolor=orange:fontsize={cfs}"
+        f":x=w-tw-{rpad}:y={by + bh + int(8 * u)}{sh}",
     ]
 
 
@@ -1404,6 +1445,7 @@ PRESET_DESC = {  # photo
     "flash": "harsh on-camera flash, hot center, dark falloff",
     "lofi": "cheap / high-ISO indoor, noisy, soft",
     "camcorder": "low-res soft video-still grab",
+    "vhs": "VHS still grab: bled chroma, soft, murky, tracking stripes",
     "night": "long-exposure low-light: warm, noisy, hot pixels + banding",
 }
 VIDEO_DESC = {
