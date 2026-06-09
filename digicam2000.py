@@ -829,45 +829,78 @@ def _fpn_overlay_img(path, w, h, amount, seed):
     Image.fromarray(np.repeat(gray[:, :, None], 3, 2).astype(np.uint8), "RGB").save(path)
 
 
-def _headswitch_img(path, w, band, seed):
-    """Render the VHS head-switching noise band: a torn strip of harsh monochrome
-    hash that sits at the very bottom of the frame.
-
-    On VHS the two video heads hand off near the bottom of each field, and the few
-    lines around the switch point can't be tracked, so they fill with the noise the
-    head reads off un-recorded tape. It's a fixed band at the picture's foot. Faded
-    upward so its top edge ramps into the image instead of a hard line."""
-    rng = np.random.default_rng(seed + 2)
-    noise = rng.integers(0, 256, (band, w), dtype=np.uint8).astype(np.float32)
-    ramp = np.clip(np.linspace(0.0, 1.0, band) * 1.6, 0, 1)[:, None]   # fade in from the top edge
-    img = (noise * ramp).astype(np.uint8)
-    Image.fromarray(np.repeat(img[:, :, None], 3, 2), "RGB").save(path)
+def _hsw_band(h):
+    """Head-switch band height: a thin strip at the very foot of the frame. Real head
+    switching sits in the few lines of the vertical-blanking interval below the active
+    picture, hidden by TV overscan and only seen in a full-raster capture, so it is a
+    thin bottom band, not a tall one."""
+    return max(4, int(round(h * 0.03)))
 
 
-def build_vhs_stmts(in_lbl, out_lbl, w, h, hsw_png=None):
+def _headswitch_img(path, w, h):
+    """Render the alpha ENVELOPE of the VHS head-switching band: a grayscale strip that
+    is transparent at the top and opaque at the foot.
+
+    On VHS the two video heads hand off near the bottom of each field, and the few lines
+    around the switch point can't be tracked, so they fill with the noise the head reads
+    off un-recorded tape. That noise is different every frame, so it is generated live in
+    the filtergraph (see build_vhs_stmts); this image only supplies the fixed shape, a
+    soft top edge ramping into a solid band at the picture's foot, used as its alpha."""
+    band = _hsw_band(h)
+    ramp = np.clip(np.linspace(0.0, 1.0, band) * 1.7, 0, 1)           # fade in from the top edge
+    img = np.broadcast_to(ramp[:, None] * 255.0, (band, w)).astype(np.uint8)
+    Image.fromarray(img, "L").save(path)
+
+
+def build_vhs_stmts(in_lbl, out_lbl, w, h, fps, hsw_png=None, hsw_seed=-1):
     """VHS tape-recording degradation, applied AFTER the camera ISP/overlay (the tape
-    records an already-finished video signal, then plays it back imperfectly):
+    records an already-finished video signal, then plays it back imperfectly). Modelled on
+    how a VHS deck actually mangles the signal:
 
-      * chroma bandwidth collapse + bleed: VHS records colour at a fraction of luma
-        resolution, so colour is smeared horizontally and misregistered from luma
-        (downscale the Cb/Cr planes hard, then shift them),
-      * luma horizontal softness (lower luma bandwidth than broadcast),
-      * head-switching noise band at the foot of the frame.
+      * chroma bandwidth collapse + Y/C delay: VHS records colour at roughly a tenth of
+        luma resolution on a separate, lower band, so colour smears horizontally and lags
+        luma at edges (downscale Cb/Cr hard, then shift them past luma),
+      * chroma noise: heavy, temporal colour speckle in the under-sampled chroma channel,
+      * luma horizontal softness: lower luma bandwidth than broadcast,
+      * head-switching band: a THIN strip of off-tape hash at the very foot of the frame,
+        regenerated every frame (live color+noise, temporal), shaped by a fixed alpha
+        envelope (hsw_png). It lives in the overscan, hence thin and bottom-edge only,
+      * dropouts: brief bright horizontal streaks where the tape briefly loses contact,
+        sparse and different every frame (they come and go, they are not always present).
 
-    Returns a list of filtergraph statements ending in [out_lbl]."""
-    cw = max(2, w // 10)                                    # collapsed chroma width (~1/10 luma)
-    s = [f"[{in_lbl}]format=yuv444p,extractplanes=y+u+v[vy][vu][vv];"
-         f"[vu]scale={cw}:{h}:flags=bilinear,scale={w}:{h}:flags=bilinear,setsar=1[vus];"
-         f"[vv]scale={cw}:{h}:flags=bilinear,scale={w}:{h}:flags=bilinear,setsar=1[vvs];"
-         f"[vy]setsar=1[vys];"
-         f"[vys][vus][vvs]mergeplanes=0x001020:yuv444p,"
-         f"chromashift=crh=4:cbh=-3,"                       # colour misregistered from luma
-         f"gblur=sigma=0.8:sigmaV=0[vtape]"]                # horizontal-only luma softness
+    All the tape noise (chroma speckle, head-switch hash, dropouts) shares the per-render
+    hsw_seed so it differs each render. Returns statements ending in [out_lbl]."""
+    cw = max(2, w // 11)                                    # collapsed chroma width (~1/11 luma)
+    band = _hsw_band(h)
+    r = f"{fps:.4f}"
+    s = [
+        # chroma bandwidth collapse + Y/C delay + temporal chroma speckle + luma softness
+        f"[{in_lbl}]format=yuv444p,extractplanes=y+u+v[vy][vu][vv];"
+        f"[vu]scale={cw}:{h}:flags=bilinear,scale={w}:{h}:flags=bilinear,setsar=1[vus];"
+        f"[vv]scale={cw}:{h}:flags=bilinear,scale={w}:{h}:flags=bilinear,setsar=1[vvs];"
+        f"[vy]gblur=sigma=0.8:sigmaV=0,setsar=1[vys];"
+        f"[vys][vus][vvs]mergeplanes=0x001020:yuv444p,"
+        f"chromashift=crh=5:cbh=-4,"                        # Y/C delay (colour lags luma)
+        f"noise=c1s=24:c2s=24:allf=t+u:all_seed={hsw_seed},"  # temporal chroma noise
+        f"format=rgb24,setsar=1[vtape]"]
     cur = "vtape"
+    # tape dropouts: rare bright horizontal dashes, fresh every frame
+    s.append(
+        f"color=c=black:s={w}x{h}:r={r}:d=3600,format=yuv444p,"
+        f"noise=alls=100:allf=t+u:all_seed={hsw_seed + 1},"
+        f"lutyuv=y='if(gt(val\\,252)\\,255\\,0)':u=128:v=128,"  # keep only the rare peaks -> sparse specks
+        f"scale={max(2, w // 45)}:{h}:flags=bilinear,scale={w}:{h}:flags=bilinear,"  # stretch into streaks
+        f"format=gbrp,setsar=1[drp];"
+        f"[{cur}][drp]blend=all_mode=screen:shortest=1[vdrop]")
+    cur = "vdrop"
     if hsw_png:
-        s.append(f"movie='{hsw_png}':loop=0,setpts=N/(FRAME_RATE*TB),format=rgb24,setsar=1[hsw];"
-                 f"[{cur}]format=rgb24,setsar=1[vtb];"
-                 f"[vtb][hsw]overlay=0:H-h:shortest=1[{out_lbl}]")
+        s.append(
+            f"color=c=gray:s={w}x{band}:r={r}:d=3600,"
+            f"noise=alls=100:allf=t+u:all_seed={hsw_seed + 2},"
+            f"eq=contrast=2.2,format=gbrp,setsar=1[hnz];"   # harsh off-tape hash (noise caps at 100)
+            f"movie='{hsw_png}':loop=0,setpts=N/(FRAME_RATE*TB),format=gray,setsar=1[hramp];"
+            f"[hnz][hramp]alphamerge[hband];"
+            f"[{cur}][hband]overlay=0:H-h:shortest=1[{out_lbl}]")
     else:
         s.append(f"[{cur}]copy[{out_lbl}]")
     return s
@@ -948,7 +981,7 @@ def build_post_filters(vp, datestamp, noise_seed=-1):
 
 
 def build_video_graph(vp, datestamp, smear_mode="classic", hot_png=None, fpn_png=None,
-                      hsw_png=None, noise_seed=-1):
+                      hsw_png=None, noise_seed=-1, hsw_seed=-1):
     """Full video chain '[0:v]...[v]', in true imaging order:
 
         sampling/exposure -> OPTICS -> SENSOR -> ISP -> scan/encode
@@ -1024,7 +1057,7 @@ def build_video_graph(vp, datestamp, smear_mode="classic", hot_png=None, fpn_png
     # post filters land on an intermediate label and the tape degradation produces [v].
     if vp.get("vhs"):
         stmts.append(f"[{cur}]{build_post_filters(vp, datestamp, noise_seed)}[pf]")
-        stmts += build_vhs_stmts("pf", "v", w, h, hsw_png)
+        stmts += build_vhs_stmts("pf", "v", w, h, fps, hsw_png, hsw_seed)
     else:
         stmts.append(f"[{cur}]{build_post_filters(vp, datestamp, noise_seed)}[v]")
     return ";".join(stmts)
@@ -1110,10 +1143,12 @@ def process_video(in_path, out_path, vp, datestamp=None, audio=True, motor_wav=N
 
     # Per-render seeds for the thermal noise (read grain, tape head-switch hash, mic hiss)
     # so they differ each render; the sensor defect maps stay on the fixed SENSOR_SEED.
+    # Keep sub-seeds well under INT_MAX: the VHS stage derives hsw_seed+1/+2 for its
+    # extra noise sources, and ffmpeg's noise all_seed caps at INT_MAX (2^31-1).
     _, sub = _resolve_seed(seed)
-    noise_seed = sub.randrange(1 << 31)
-    hsw_seed = sub.randrange(1 << 31)
-    hiss_seed = sub.randrange(1 << 31)
+    noise_seed = sub.randrange(1 << 30)
+    hsw_seed = sub.randrange(1 << 30)
+    hiss_seed = sub.randrange(1 << 30)
 
     # Generate the static sensor-defect maps once (looped in by build_video_graph). Hot
     # pixels and FPN are the camera's permanent defect map -> fixed SENSOR_SEED. The VHS
@@ -1131,11 +1166,12 @@ def process_video(in_path, out_path, vp, datestamp=None, audio=True, motor_wav=N
     hsw_png = None
     if vp.get("vhs"):
         hsw_png = tempfile.NamedTemporaryFile(suffix=".png", delete=False).name
-        _headswitch_img(hsw_png, vp["w"], max(6, int(vp["h"] * 0.05)), seed=hsw_seed)
+        _headswitch_img(hsw_png, vp["w"], vp["h"])
         tmp_pngs.append(hsw_png)
 
     try:
-        graph = build_video_graph(vp, datestamp, smear_mode, hot_png, fpn_png, hsw_png, noise_seed)
+        graph = build_video_graph(vp, datestamp, smear_mode, hot_png, fpn_png, hsw_png,
+                                  noise_seed, hsw_seed)
         if do_audio:
             graph += ";" + build_audio_graph(vp, motor=use_motor, hiss_seed=hiss_seed)
 

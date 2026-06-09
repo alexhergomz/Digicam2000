@@ -63,9 +63,10 @@ heavy noise, hot pixels, readout stripes, banding).
 Video: `digicam` (MJPEG 640x480 movie mode with IMA-ADPCM audio), `sony` (Cyber-shot
 320x240 MPEG movie), `camcorder` (interlaced MiniDV 720x480 with low-light grain),
 `mpeg_lofi` (macroblocked 320x240 MPEG-4), `night` (low-light CCD video: lifted murk plus
-static hot pixels and fixed-pattern noise), `vhs` (a camcorder dubbed to tape: chroma
-bleed, luma softening, a head-switching noise band at the foot of the frame, wow/flutter
-audio). Each degrades the soundtrack too.
+static hot pixels and fixed-pattern noise), `vhs` (a camcorder dubbed to tape: collapsed
+and bled color, color lag at edges, temporal chroma noise, intermittent dropout streaks, a
+thin flickering head-switch band at the bottom edge, wow/flutter audio). Each degrades the
+soundtrack too.
 
 ## Matching a real camera (framing)
 
@@ -131,7 +132,7 @@ Each artifact maps to a real cause and runs at the right point in the chain:
 | In-camera ISP | weak auto white balance, punchy matrix, sharpening, chroma NR | color cast, oversaturation, edge halos, color smear |
 | Lighting cast | a non-daylight source the auto white balance could not fully correct | tungsten orange, fluorescent green, or open-shade blue residual tint (`--cast`) |
 | Camcorder OSD | the chrome a camcorder drew over the picture while recording | blinking REC dot, running timecode, battery gauge, orange clock (`--osd`) |
-| VHS tape | the recording medium plays back imperfectly | collapsed/bled color, softened luma, a head-switching noise band (`-p vhs`) |
+| VHS tape | the recording medium plays back imperfectly | colour recorded at ~1/10 luma bandwidth (heavy horizontal bleed), Y/C delay (colour lags luma at edges), temporal chroma noise, intermittent dropout streaks, and a thin flickering head-switch band in the bottom overscan line (`-p vhs`) |
 | JPEG / codec | low-quality 4:2:0, period video codecs | 8x8 blocking, chroma bleed, MJPEG / DV / MPEG |
 | Audio (video) | tiny mic, cheap ADC, AGC, zoom motor next to the mic, tape transport | mono, band-limit, AGC pumping, hiss, bit-crush, zoom-motor whir, tape wow/flutter |
 
