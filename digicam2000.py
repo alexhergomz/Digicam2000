@@ -866,29 +866,51 @@ def _headswitch_img(path, w, h):
 
 
 def build_vhs_stmts(in_lbl, out_lbl, w, h, fps, hsw_png=None, hsw_seed=-1):
-    """VHS tape-recording degradation, applied AFTER the camera ISP/overlay (the tape
-    records an already-finished video signal, then plays it back imperfectly). Modelled on
-    how a VHS deck actually mangles the signal:
+    """VHS tape playback degradation, applied AFTER the camera ISP/overlay (the tape records
+    a finished signal, then a worn deck plays it back). Modelled on the real playback signal
+    chain, IN ORDER:
 
-      * chroma bandwidth collapse + Y/C delay: VHS records colour at roughly a tenth of
-        luma resolution on a separate, lower band, so colour smears horizontally and lags
-        luma at edges (downscale Cb/Cr hard, then shift them past luma),
-      * chroma noise: heavy, temporal colour speckle in the under-sampled chroma channel,
-      * luma horizontal softness: lower luma bandwidth than broadcast,
-      * head-switching band: a THIN strip of off-tape hash at the very foot of the frame,
-        regenerated every frame (live color+noise, temporal), shaped by a fixed alpha
-        envelope (hsw_png). It lives in the overscan, hence thin and bottom-edge only,
-      * dropouts: brief bright horizontal streaks where the tape briefly loses contact,
-        sparse and different every frame (they come and go, they are not always present).
+      1. MECHANICAL READ / time-base error. The helical-scan heads and the capstan move the
+         tape past the gap with imperfect timing, so each scan line is read a touch early or
+         late -> a per-line HORIZONTAL position error, applied with the `displace` filter
+         from a row-dependent displacement map. Three real components:
+           * wow + flutter: continuous, low-amplitude drift from drum/capstan/roller
+             eccentricity (a couple of Hz plus tens of Hz) -- subtle, always there,
+           * flagging: the servo hasn't settled just after vertical sync, so the error is
+             largest at the TOP of the field and decays down it ("flag-waving"),
+           * tracking disturbances: ~every 10 s the head wanders off the track for ~a second
+             -- the time-base error spikes (picture jitters, the top tears) and the off-track
+             read throws a noise band (step 5) AT THE SAME MOMENT (shared envelope).
+      2. color-under chroma: bandwidth collapse + Y/C delay + chroma noise; luma softness.
+      3. dropouts: brief bright streaks where the tape momentarily loses head contact.
+      4. head-switching: a thin band of off-tape hash in the overscan at the field foot.
 
-    All the tape noise (chroma speckle, head-switch hash, dropouts) shares the per-render
-    hsw_seed so it differs each render. Returns statements ending in [out_lbl]."""
+    The dramatic errors are intermittent; between disturbances only the subtle continuous
+    flutter remains. Tape noise shares the per-render hsw_seed. Returns stmts ending [out_lbl]."""
     cw = max(2, w // 11)                                    # collapsed chroma width (~1/11 luma)
     band = _hsw_band(h)
     r = f"{fps:.4f}"
+    # disturbance envelope: ~0 most of the time, a smooth pulse ~every 10s (~1s wide). Shared by
+    # the time-base spike (dx, below) and the tracking band (step 5) so the jitter and the band
+    # happen together. egeq uses geq's uppercase T; etl uses the timeline's lowercase t.
+    egeq = "pow(0.5+0.5*sin(2*PI*T/10)\\,8)"
+    etl  = "pow(0.5+0.5*sin(2*PI*t/10)\\,8)"
+    y0 = f"({h}*0.09)"                                      # flagging decay scale (top ~9% of lines)
+    dx = ("128"                                             # per-line x-displacement (128 = no shift)
+          "+1.3*sin(2*PI*1.7*T)+0.7*sin(2*PI*9*T)"          # wow + flutter (always, subtle)
+          f"+(1.5+7*{egeq})*exp(-Y/{y0})"                   # flagging (top of field; spikes on disturbance)
+          f"+5*{egeq}*sin(2*PI*6*T)")                       # whole-frame jitter (disturbance only)
     s = [
-        # chroma bandwidth collapse + Y/C delay + temporal chroma speckle + luma softness
-        f"[{in_lbl}]format=yuv444p,extractplanes=y+u+v[vy][vu][vv];"
+        # 1. MECHANICAL READ time-base error: heads/capstan read each line with imperfect timing
+        #    -> per-line horizontal position error. Build a row-dependent X-displacement map
+        #    (cheap 32-wide geq stretched to width) + a flat Y-map (no vertical shift), displace.
+        f"color=c=gray:s=32x{h}:r={r}:d=3600,format=gray,geq=lum='{dx}',"
+        f"scale={w}:{h}:flags=bilinear,format=rgb24,setsar=1[xmap];"
+        f"color=c=gray:s={w}x{h}:r={r}:d=3600,format=rgb24,setsar=1[ymap];"
+        f"[{in_lbl}]format=rgb24,setsar=1[vin];"
+        f"[vin][xmap][ymap]displace=edge=smear[vmech]",
+        # 2. color-under chroma: bandwidth collapse + Y/C delay + chroma noise + luma softness
+        f"[vmech]format=yuv444p,extractplanes=y+u+v[vy][vu][vv];"
         f"[vu]scale={cw}:{h}:flags=bilinear,scale={w}:{h}:flags=bilinear,setsar=1[vus];"
         f"[vv]scale={cw}:{h}:flags=bilinear,scale={w}:{h}:flags=bilinear,setsar=1[vvs];"
         f"[vy]gblur=sigma=0.8:sigmaV=0,setsar=1[vys];"
@@ -906,22 +928,7 @@ def build_vhs_stmts(in_lbl, out_lbl, w, h, fps, hsw_png=None, hsw_seed=-1):
         f"format=gbrp,setsar=1[drp];"
         f"[{cur}][drp]blend=all_mode=screen:shortest=1[vdrop]")
     cur = "vdrop"
-    # time-base instability (always present, periodic): WOW/FLUTTER = the whole frame drifts
-    # side to side as tape speed wanders (slow wow + faster flutter); FLAGGING = the top lines
-    # lag/skew worst because the sync timing error is largest at the head of each field
-    # ("flag-waving"). Implemented as a moving crop over a slightly widened frame (so no black
-    # edges appear) plus an extra-displaced top strip overlaid back on.
-    m = max(6, int(round(w * 0.022)))                       # wow/flutter headroom (gentle: keeps bars legible)
-    mf = max(10, int(round(w * 0.06)))                      # flagging headroom (larger; more visible)
-    topH = max(6, int(round(h * 0.12)))                     # flagging disturbs the top ~12% of lines
-    wobX = f"({m}+{w*0.012:.2f}*sin(2*PI*0.27*t)+{w*0.004:.2f}*sin(2*PI*2.9*t+1))"
-    flagX = f"({mf}+{w*0.040:.2f}*sin(2*PI*0.8*t+0.7)+{w*0.012:.2f}*sin(2*PI*4.3*t))"
-    s.append(
-        f"[{cur}]scale={w + 2*m}:{h}:flags=bilinear,crop={w}:{h}:{wobX}:0,setsar=1[vwf];"
-        f"[vwf]split[vwfa][vwfb];"
-        f"[vwfb]crop={w}:{topH}:0:0,scale={w + 2*mf}:{topH}:flags=bilinear,crop={w}:{topH}:{flagX}:0,setsar=1[vtop];"
-        f"[vwfa][vtop]overlay=0:0:shortest=1[vtb]")
-    cur = "vtb"
+    # (time-base error is modelled up front in step 1 via displace, not here)
     if hsw_png:
         s.append(
             f"color=c=gray:s={w}x{band}:r={r}:d=3600,"
@@ -934,13 +941,14 @@ def build_vhs_stmts(in_lbl, out_lbl, w, h, fps, hsw_png=None, hsw_seed=-1):
     else:
         s.append(f"[{cur}]copy[vhsw]")
         cur = "vhsw"
-    # tracking error (periodic): head/track misalignment throws a snowy band that sweeps up
-    # the frame, drifting in and out of lock (visible only intermittently).
-    trkH = max(8, int(round(h * 0.06)))
+    # 5. tracking disturbance: when the head wanders off the track (SAME envelope as the
+    #    time-base spike, so the jitter and the band coincide), the off-track read throws a
+    #    snowy band low in the frame, by the head-switch point. Present only in those windows.
+    trkH = max(10, int(round(h * 0.08)))
     s.append(
         f"color=c=gray:s={w}x{trkH}:r={r}:d=3600,"
         f"noise=alls=100:allf=t+u:all_seed={hsw_seed + 3},eq=contrast=2.4,format=gbrp,setsar=1[trk];"
-        f"[{cur}][trk]overlay=0:{int(h * 0.07)}:enable=lt(mod(t\\,9)\\,1.1):shortest=1[{out_lbl}]")
+        f"[{cur}][trk]overlay=0:{int(h - band - trkH)}:enable=gt({etl}\\,0.35):shortest=1[{out_lbl}]")
     return s
 
 
